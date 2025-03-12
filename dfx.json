@@ -1,0 +1,27 @@
+{
+  "canisters": {
+    "hunters_finance_backend": {
+      "candid": "src/hunters_finance_backend/hunters_finance_backend.did",
+      "package": "hunters_finance_backend",
+      "type": "rust"
+    },
+    "hunters_finance_frontend": {
+      "dependencies": [
+        "hunters_finance_backend"
+      ],
+      "source": [
+        "src/hunters_finance_frontend/dist"
+      ],
+      "type": "assets",
+      "workspace": "hunters_finance_frontend"
+    }
+  },
+  "defaults": {
+    "build": {
+      "args": "",
+      "packtool": ""
+    }
+  },
+  "output_env_file": ".env",
+  "version": 1
+}
