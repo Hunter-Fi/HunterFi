@@ -1,7 +1,7 @@
 # HunterFi - ICP Quantitative Trading Platform
 
 <div align="center">
-  <img src="docs/images/logo.png" alt="HunterFi Logo" width="200"/>
+  <img src="favicon.svg" alt="HunterFi Logo" width="200"/>
   <p>
     <strong>Decentralized Quantitative Trading Platform Based on Internet Computer</strong>
   </p>
