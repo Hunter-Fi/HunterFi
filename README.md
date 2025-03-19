@@ -1,190 +1,239 @@
-# `HuntersFi`
+# HunterFi - ICP Quantitative Trading Platform
 
-## Factory Canister (factory)
+<div align="center">
+  <img src="docs/images/logo.png" alt="HunterFi Logo" width="200"/>
+  <p>
+    <strong>Decentralized Quantitative Trading Platform Based on Internet Computer</strong>
+  </p>
+  <p>
+    <a href="https://internetcomputer.org/"><img src="https://img.shields.io/badge/Platform-Internet%20Computer-blue" alt="Platform" /></a>
+    <a href="https://internetcomputer.org/docs/current/developer-docs/backend/rust/"><img src="https://img.shields.io/badge/Backend-Rust-orange" alt="Rust" /></a>
+    <a href="https://github.com/dfinity/candid"><img src="https://img.shields.io/badge/IDL-Candid-yellow" alt="Candid" /></a>
+    <a href="https://reactjs.org/"><img src="https://img.shields.io/badge/Frontend-React-blue" alt="React" /></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="License" /></a>
+  </p>
+</div>
 
-The Factory Canister is the entry point for the entire quantitative trading system, developed using Rust. It is responsible for:
+## 📖 Overview
 
-- **Managing strategy deployments**: Deploys new trading strategies.
-- **Collecting deployment fees**: Charges a fee of 1 ICP per deployment.
-- **Maintaining a registry**: Keeps a record of all deployed strategies.
+HunterFi is a decentralized quantitative trading platform built on the Internet Computer Protocol (ICP), allowing users to create, deploy, and manage various automated trading strategies. The platform leverages ICP's trustless computing capabilities to provide enhanced security, transparency, and decentralization.
 
-**User Interactions:**
+### 🌟 Key Features
 
-- **Deploy new trading strategies**: Users can deploy new strategies.
-- **View owned strategies**: Users can check the list of strategies they have deployed.
-- **Retrieve strategy details**: Detailed information about each strategy is available.
+- **Decentralized Deployment**: All strategies are deployed as independent canisters on ICP
+- **Diverse Strategies**: Supports multiple strategies including Dollar-Cost Averaging (DCA), Value Averaging, Fixed Balance, Limit Orders, and more
+- **Exchange Integration**: Supports decentralized exchanges like ICPSwap, KongSwap, and more
+- **Security & Reliability**: Open-source strategy code, self-custody of funds, no need for asset custody
+- **Customizable**: Users can adjust strategy parameters according to their specific needs
+- **Real-time Monitoring**: Provides visualization of strategy performance and historical transaction data
 
-When a user deploys a new strategy, the Factory Canister creates a new Strategy Canister and installs the corresponding WASM code based on the strategy type chosen by the user.
+## 💱 DEX Integration Status
 
----
+The following table shows the current integration status for various decentralized exchanges:
 
-## Strategy Common Library (strategy_common)
+| Exchange | Status | Features Supported | Notes |
+|----------|--------|-------------------|-------|
+| ICPSwap | ✅ Complete | Swaps, Liquidity Pools, Price Feeds | Full integration with all trading pairs |
+| KongSwap | 🔄 In Progress | Basic Swaps | Core functionality working, advanced features coming soon |
+| Sonic | 🔄 In Progress | Price Feeds | coming soon |
+| InfinitySwap | 🔍 Planned | - | coming soon |
+| ICDex | 🔍 Planned | - | coming soon |
 
-The Strategy Common Library is a shared library that provides common functionalities and type definitions for all strategy implementations, ensuring consistency and maintainability across the system. It consists of four main modules:
+Legend:
+- ✅ Complete: Fully integrated and tested
+- 🔄 In Progress: Work underway, partially implemented
+- 🔍 Planned: On roadmap but implementation not yet started
 
-### 1. types
+## 🏗️ System Architecture
 
-Defines all shared data structures and enumerated types for strategies, such as:
-- `StrategyType`
-- `StrategyStatus`
-- `Transaction`
+HunterFi employs a modular design, primarily consisting of the following components:
 
-### 2. timer
+### Core Components
 
-Manages timed execution functions, allowing strategies to:
-- Set up scheduled tasks.
-- Cancel scheduled tasks.
+#### Factory Canister (factory)
 
-### 3. cycles
+As the platform entry point, it is responsible for:
+- **Strategy Deployment Management**: Creates new strategy canisters
+- **Deployment Fee Collection**: Charges 1 ICP per deployment as a platform fee
+- **Strategy Registry Maintenance**: Records and indexes all deployed strategies
 
-Provides cycles management functionality, enabling strategies to:
-- Check available cycles.
-- Top up cycles to ensure continuous operation.
+#### Strategy Common Library (strategy_common)
 
-### 4. exchange
+A core library providing shared functionality and type definitions for all strategies, containing four main modules:
+- **types**: Defines shared data structures and enumerated types
+- **timer**: Manages timed execution functions
+- **cycles**: Provides cycles management functionality
+- **exchange**: Defines exchange interfaces
 
-Defines exchange interfaces and includes mock implementations to offer:
-- A unified method for interacting with exchanges.
+#### Strategy Canisters
 
----
-
-## Dollar Cost Averaging Strategy (strategy_dca)
-
-The DCA Strategy Canister implements the dollar-cost averaging method, a strategy that involves continuously investing a fixed amount at regular time intervals.
-
-**Key Features:**
-
-- **Periodic Trades**: Executes trades at fixed intervals to purchase a specific crypto asset.
-- **Fixed Investment Amount**: Buys the asset with a predetermined amount of quote currency, regardless of market price fluctuations.
-- **User Controls**: Allows users to start, pause, and manage strategy execution.
-- **History Tracking**: Records the history of executed trades.
-
-The core logic is to convert a fixed amount of quote currency to the base token without consideration for price fluctuations.
-
----
-
-## Value Averaging Strategy (strategy_value_avg)
-
-The Value Averaging Strategy Canister implements a value averaging strategy, which involves periodic investments based on a predetermined target growth path for the account's value.
-
-**Key Features:**
-
-- **Performance-Based Investment**: Determines the investment amount for each period based on the actual performance of the account.
-- **Target Growth Path**: Ensures that the account value grows according to a pre-planned curve.
-- **Dynamic Adjustments**: Increases investment if the portfolio value is below target or reduces investment (or sells assets) if above target.
-
----
-
-## Fixed Balance Strategy (strategy_fixed_balance)
-
-The Fixed Balance Strategy Canister maintains a constant account balance or total asset value by periodically adjusting fund allocations.
-
-**Key Features:**
-
-- **Regular Monitoring**: Routinely checks the account balance.
-- **Automated Adjustments**: Executes buy or sell operations to adjust the balance to a preset target value.
-- **Stability Focus**: Suitable for investors who want to maintain stability amidst market fluctuations.
-
----
-
-## Limit Orders Strategy (strategy_limit_order)
-
-The Limit Orders Strategy Canister implements a limit order strategy, enabling users to set specific prices for buying or selling assets.
-
-**Key Features:**
-
-- **Continuous Market Monitoring**: Monitors market prices to detect when they reach preset conditions.
-- **Automated Execution**: Automatically executes trades once the conditions are met.
-- **Multiple Conditions**: Supports setting multiple buying or selling conditions, each with a target price and quantity.
-
----
-
-## Wash Trading Strategy (strategy_wash_trading)
-
-The Wash Trading Strategy Canister implements a wash trading strategy, where the system acts as both buyer and seller to increase the trading volume of a specific asset.
-
-**Key Features:**
-
-- **Self-Trading Operations**: Executes simultaneous buying and selling operations.
-- **Preset Frequencies and Amounts**: Operates at predetermined frequencies and trade sizes.
-- **Use Cases**: Useful for testing market liquidity or analyzing trading volumes.
-- **Configurable Parameters**: Users can configure trading frequency, quantity, and price range for automatic executions.
-
----
-
-## Common Interface for Strategy Canisters
-
-Each Strategy Canister implements a basic set of functionalities, including:
-
-- **Initialization**
+Each strategy is implemented as an independent canister with common features including:
+- **Initialization and Configuration**
 - **Start/Pause Execution**
-- **Executing Strategy Logic**
-- **Recording Execution History**
-- **Managing Cycles**
+- **Strategy Logic Execution**
+- **Transaction History Recording**
+- **Cycles Management**
 
-Additionally, each canister incorporates unique trading logic tailored to its specific strategy type.
+### Strategy Types
 
----
+#### Dollar Cost Averaging Strategy (strategy_dca)
 
+Implements the dollar-cost averaging method, periodically investing a fixed amount.
+- **Periodic Trades**: Executes at fixed time intervals
+- **Fixed Investment Amount**: Uses a preset amount to purchase assets
+- **User Controls**: Allows starting, pausing, and managing execution
 
-Welcome to your new `HuntersFi` project and to the Internet Computer development community. By default, creating a new project adds this README and some template files to your project directory. You can edit these template files to customize your project and to include your own code to speed up the development cycle.
+#### Value Averaging Strategy (strategy_value_avg)
 
-To get started, you might want to explore the project directory structure and the default configuration file. Working with this project in your development environment will not affect any production deployment or identity tokens.
+Periodic investment based on the target growth curve of account value.
+- **Performance-Based Investment**: Determines investment amount based on actual account performance
+- **Target Growth Curve**: Ensures account value grows according to a predetermined trajectory
+- **Dynamic Adjustments**: Increases investment when below target, decreases when above target
 
-To learn more before you start working with `HuntersFi`, see the following documentation available online:
+#### Fixed Balance Strategy (strategy_fixed_balance)
 
-- [Quick Start](https://internetcomputer.org/docs/current/developer-docs/setup/deploy-locally)
-- [SDK Developer Tools](https://internetcomputer.org/docs/current/developer-docs/setup/install)
-- [Rust Canister Development Guide](https://internetcomputer.org/docs/current/developer-docs/backend/rust/)
-- [ic-cdk](https://docs.rs/ic-cdk)
-- [ic-cdk-macros](https://docs.rs/ic-cdk-macros)
-- [Candid Introduction](https://internetcomputer.org/docs/current/developer-docs/backend/candid/)
+Maintains a constant account balance through periodic fund allocation adjustments.
+- **Regular Monitoring**: Periodically checks account balance
+- **Automated Adjustments**: Executes buy or sell operations to adjust to target value
+- **Stability-Oriented**: Suitable for investors seeking stability amid market fluctuations
 
-If you want to start working on your project right away, you might want to try the following commands:
+#### Limit Order Strategy (strategy_limit_order)
+
+Implements limit order functionality, allowing users to set specific prices for buying or selling assets.
+- **Continuous Market Monitoring**: Monitors prices reaching preset conditions
+- **Automated Execution**: Automatically trades when conditions are met
+- **Multiple Condition Support**: Supports setting multiple buy/sell conditions
+
+#### Self-Hedging Strategy (strategy_self_hedging)
+
+System acts as both buyer and seller to increase trading volume for a specific asset.
+- **Self-Trading Operations**: Executes synchronized buying and selling operations
+- **Preset Frequencies and Amounts**: Operates at predetermined frequency and trade sizes
+- **Configurable Parameters**: Users can configure trading frequency, quantity, and price range
+
+## 🔧 Technology Stack
+
+### Backend
+- **Rust**: Primary development language for implementing canister logic
+- **Candid**: Interface Definition Language (IDL) for defining canister interfaces
+- **ic-cdk**: Internet Computer Development Kit
+- **ic-stable-structures**: Persistent storage management library
+
+### Frontend
+- **React**: User interface framework
+- **TypeScript**: Type-safe JavaScript superset
+- **Ant Design**: UI component library
+- **dfx**: DFINITY Canister SDK
+- **Internet Identity**: Authentication
+
+## 🚀 Quick Start
+
+### Prerequisites
+
+- [Rust](https://www.rust-lang.org/tools/install) >= 1.60.0
+- [DFX](https://internetcomputer.org/docs/current/developer-docs/setup/install) >= 0.14.0
+- [Node.js](https://nodejs.org/) >= 16.x (required for frontend development)
+
+### Local Development
+
+1. **Clone Repository and Install Dependencies**
 
 ```bash
-cd hunters_finance/
-dfx help
-dfx canister --help
+git clone https://github.com/yourusername/hunterfi.git
+cd hunterfi
+npm install  # Install frontend dependencies
 ```
 
-## Running the project locally
-
-If you want to test your project locally, you can use the following commands:
+2. **Start Local Internet Computer Network**
 
 ```bash
-# Starts the replica, running in the background
-dfx start --background
+dfx start --background --clean
+```
 
-# Deploys your canisters to the replica and generates your candid interface
+3. **Deploy Canisters**
+
+```bash
 dfx deploy
 ```
 
-Once the job completes, your application will be available at `http://localhost:4943?canisterId={asset_canister_id}`.
-
-If you have made changes to your backend canister, you can generate a new candid interface with
+4. **Initialize Factory Canister**
 
 ```bash
-npm run generate
+# Get Factory canister ID
+FACTORY_ID=$(dfx canister id factory)
+
+# Deploy DCA strategy WASM
+dfx canister call factory install_strategy_wasm '(record { strategy_type = variant { DollarCostAveraging }; wasm_module = blob })'
 ```
 
-at any time. This is recommended before starting the frontend development server, and will be run automatically any time you run `dfx deploy`.
-
-If you are making frontend changes, you can start a development server with
+5. **Start Frontend Development Server**
 
 ```bash
 npm start
 ```
 
-Which will start a server at `http://localhost:8080`, proxying API requests to the replica at port 4943.
+The application will be available at `http://localhost:8080`, with API requests proxied to the replica at port 4943.
 
-### Note on frontend environment variables
+## 📝 Usage Guide
 
-If you are hosting frontend code somewhere without using DFX, you may need to make one of the following adjustments to ensure your project does not fetch the root key in production:
+### Deploying a New Strategy
 
-- set`DFX_NETWORK` to `ic` if you are using Webpack
-- use your own preferred method to replace `process.env.DFX_NETWORK` in the autogenerated declarations
-  - Setting `canisters -> {asset_canister_id} -> declarations -> env_override to a string` in `dfx.json` will replace `process.env.DFX_NETWORK` with the string in the autogenerated declarations
-- Write your own `createActor` constructor
+1. Connect with Internet Identity to log in to the platform
+2. Navigate to the "Deploy Strategy" page
+3. Select strategy type (DCA, Value Averaging, etc.)
+4. Configure strategy parameters:
+   - Trading pair
+   - Exchange
+   - Investment amount
+   - Execution frequency
+   - Maximum slippage
+5. Confirm and deploy (1 ICP deployment fee will be charged)
+
+### Managing Strategies
+
+1. View all deployed strategies on the "My Strategies" page
+2. Click on strategy cards to view details
+3. Use control options:
+   - Start/Pause strategy
+   - Execute manually once
+   - View historical transaction records
+   - Modify strategy parameters
+
+## 🔒 Security Considerations
+
+- **Fund Security**: User funds are always under user control, the platform does not hold user assets
+- **Code Audit**: All strategy code is open-source and transparent, fully auditable
+- **Error Handling**: The system is designed with comprehensive error handling mechanisms to ensure stable execution
+- **Slippage Protection**: Trade execution includes slippage protection mechanisms to prevent losses from price volatility
+
+## 🌐 Mainnet Deployment
+
+Deploying to ICP mainnet is similar to local deployment, but requires:
+
+1. Set mainnet identity: `dfx identity use <your_identity>`
+2. Ensure sufficient cycles for deployment
+3. Deploy to mainnet: `dfx deploy --network ic`
+
+## 🛠️ Developer Resources
+
+- [Internet Computer Documentation](https://internetcomputer.org/docs/)
+- [Rust Canister Development Guide](https://internetcomputer.org/docs/current/developer-docs/backend/rust/)
+- [ic-cdk Documentation](https://docs.rs/ic-cdk)
+- [ic-cdk-macros Documentation](https://docs.rs/ic-cdk-macros)
+- [Candid Introduction](https://internetcomputer.org/docs/current/developer-docs/backend/candid/)
+
+## 🤝 Contribution Guidelines
+
+Code contributions, issue reporting, and improvement suggestions are welcome. Please follow these steps:
+
+1. Fork this repository
+2. Create a feature branch: `git checkout -b feature/amazing-feature`
+3. Commit changes: `git commit -m 'Add some amazing feature'`
+4. Push to the branch: `git push origin feature/amazing-feature`
+5. Open a Pull Request
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details
 
 
