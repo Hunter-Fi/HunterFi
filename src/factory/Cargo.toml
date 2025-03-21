@@ -1,0 +1,19 @@
+[package]
+name = "factory"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+candid = { workspace = true }
+ic-cdk = { workspace = true }
+ic-cdk-macros = { workspace = true }
+serde = { workspace = true }
+serde_bytes = { workspace = true }
+ic-stable-structures = { workspace = true }
+ic-cdk-timers = { workspace = true }
+ic-ledger-types = { workspace = true }
+strategy_common = { path = "../strategy_common" }
+exchange = { path = "../exchange" } 

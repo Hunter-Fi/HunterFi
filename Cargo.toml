@@ -1,5 +1,21 @@
 [workspace]
 members = [
-    "src/hunters_finance_backend"
+    "src/factory",
+    "src/strategy_common",
+    "src/exchange",
+    "src/strategies/dca",
+    "src/strategies/value_avg",
+    "src/strategies/fixed_balance",
+    "src/strategies/limit_order",
+    "src/strategies/self_hedging",
 ]
-resolver = "2"
+
+[workspace.dependencies]
+candid = "0.10"
+ic-cdk = "0.17"
+ic-cdk-macros = "0.17"
+serde = { version = "1.0", features = ["derive"] }
+serde_bytes = "0.11"
+ic-stable-structures = "0.6"
+ic-cdk-timers = "0.11"
+ic-ledger-types = "0.14" 

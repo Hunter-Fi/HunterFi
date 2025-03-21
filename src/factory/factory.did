@@ -1,0 +1,140 @@
+type DeploymentResult = variant {
+  Success : principal;
+  Error : text;
+};
+
+type Exchange = variant {
+  ICPSwap;
+  KongSwap;
+  Sonic;
+  InfinitySwap;
+  ICDex;
+};
+
+type StrategyMetadata = record {
+  canister_id : principal;
+  strategy_type : StrategyType;
+  owner : principal;
+  created_at : nat64;
+  status : StrategyStatus;
+  exchange : Exchange;
+  trading_pair : TradingPair;
+};
+
+type StrategyStatus = variant {
+  Created;
+  Running;
+  Paused;
+  EmergencyStopped;
+  Terminated;
+};
+
+type StrategyType = variant {
+  DollarCostAveraging;
+  ValueAveraging;
+  FixedBalance;
+  LimitOrder;
+  SelfHedging;
+};
+
+type TokenMetadata = record {
+  canister_id : principal;
+  symbol : text;
+  decimals : nat8;
+};
+
+type TradingPair = record {
+  base_token : TokenMetadata;
+  quote_token : TokenMetadata;
+};
+
+type DCAConfig = record {
+  exchange : Exchange;
+  base_token : TokenMetadata;
+  quote_token : TokenMetadata;
+  amount_per_execution : nat;
+  interval_secs : nat64;
+  max_executions : opt nat64;
+  slippage_tolerance : float64;
+};
+
+type ValueAvgConfig = record {
+  exchange : Exchange;
+  base_token : TokenMetadata;
+  quote_token : TokenMetadata;
+  target_value_increase : nat;
+  interval_secs : nat64;
+  max_executions : opt nat64;
+  slippage_tolerance : float64;
+};
+
+type FixedBalanceConfig = record {
+  exchange : Exchange;
+  token_allocations : vec record { TokenMetadata; float64 };
+  rebalance_threshold : float64;
+  interval_secs : nat64;
+  slippage_tolerance : float64;
+};
+
+type OrderType = variant {
+  Buy;
+  Sell;
+};
+
+type LimitOrderConfig = record {
+  exchange : Exchange;
+  base_token : TokenMetadata;
+  quote_token : TokenMetadata;
+  order_type : OrderType;
+  price : nat;
+  amount : nat;
+  expiration : opt nat64;
+};
+
+type SelfHedgingConfig = record {
+  exchange : Exchange;
+  primary_token : TokenMetadata;
+  hedge_token : TokenMetadata;
+  hedge_ratio : float64;
+  price_change_threshold : float64;
+  check_interval_secs : nat64;
+  slippage_tolerance : float64;
+};
+
+type WasmModule = record {
+  strategy_type : StrategyType;
+  wasm_module : blob;
+};
+
+service : {
+  // Admin Management
+  add_admin : (principal) -> (variant { Ok; Err : text });
+  remove_admin : (principal) -> (variant { Ok; Err : text });
+  get_admins : () -> (vec principal) query;
+  is_caller_admin : () -> (bool) query;
+
+  // Strategy Deployment
+  deploy_dca_strategy : (DCAConfig) -> (DeploymentResult);
+  deploy_value_avg_strategy : (ValueAvgConfig) -> (DeploymentResult);
+  deploy_fixed_balance_strategy : (FixedBalanceConfig) -> (DeploymentResult);
+  deploy_limit_order_strategy : (LimitOrderConfig) -> (DeploymentResult);
+  deploy_self_hedging_strategy : (SelfHedgingConfig) -> (DeploymentResult);
+  
+  // Strategy WASM Management
+  install_strategy_wasm : (WasmModule) -> (variant { Ok; Err : text });
+  get_strategy_wasm : (StrategyType) -> (opt blob) query;
+  
+  // Strategy Registry
+  get_strategies_by_owner : (principal) -> (vec StrategyMetadata) query;
+  get_all_strategies : () -> (vec StrategyMetadata) query;
+  get_strategy : (principal) -> (opt StrategyMetadata) query;
+  get_strategy_count : () -> (nat64) query;
+  
+  // Governance
+  set_deployment_fee : (nat64) -> (variant { Ok; Err : text });
+  get_deployment_fee : () -> (nat64) query;
+  withdraw_funds : (principal, nat64) -> (variant { Ok; Err : text });
+  
+  // Cycles Management
+  get_cycles_balance : () -> (nat64) query;
+} 

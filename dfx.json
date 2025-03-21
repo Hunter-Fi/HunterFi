@@ -1,19 +1,47 @@
 {
   "canisters": {
-    "hunters_finance_backend": {
-      "candid": "src/hunters_finance_backend/hunters_finance_backend.did",
-      "package": "hunters_finance_backend",
+    "factory": {
+      "candid": "src/factory/factory.did",
+      "package": "factory",
       "type": "rust"
     },
-    "hunters_finance_frontend": {
+    "strategy_dca": {
+      "candid": "src/strategies/dca/dca.did",
+      "package": "strategy_dca",
+      "type": "rust"
+    },
+    "strategy_value_avg": {
+      "candid": "src/strategies/value_avg/value_avg.did",
+      "package": "strategy_value_avg",
+      "type": "rust"
+    },
+    "strategy_fixed_balance": {
+      "candid": "src/strategies/fixed_balance/fixed_balance.did",
+      "package": "strategy_fixed_balance", 
+      "type": "rust"
+    },
+    "strategy_limit_order": {
+      "candid": "src/strategies/limit_order/limit_order.did",
+      "package": "strategy_limit_order",
+      "type": "rust"
+    },
+    "strategy_self_hedging": {
+      "candid": "src/strategies/self_hedging/self_hedging.did",
+      "package": "strategy_self_hedging",
+      "type": "rust"
+    },
+    "frontend": {
       "dependencies": [
-        "hunters_finance_backend"
+        "factory"
       ],
+      "frontend": {
+        "entrypoint": "src/frontend/src/index.html"
+      },
       "source": [
-        "src/hunters_finance_frontend/dist"
+        "src/frontend/assets",
+        "dist/frontend/"
       ],
-      "type": "assets",
-      "workspace": "hunters_finance_frontend"
+      "type": "assets"
     }
   },
   "defaults": {
@@ -22,6 +50,5 @@
       "packtool": ""
     }
   },
-  "output_env_file": ".env",
   "version": 1
-}
+} 
