@@ -148,12 +148,20 @@ pub struct LimitOrderConfig {
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct SelfHedgingConfig {
     pub exchange: Exchange,              // Exchange type
-    pub primary_token: TokenMetadata,    // Primary token
-    pub hedge_token: TokenMetadata,      // Hedge token
-    pub hedge_ratio: f64,                // Hedge ratio
-    pub price_change_threshold: f64,     // Price change threshold (percentage to trigger hedging)
-    pub check_interval_secs: u64,        // Check interval (seconds)
+    pub trading_token: TokenMetadata,    // Token to generate volume for
+    pub transaction_size: u128,          // Size of each transaction (amount of tokens)
+    pub order_split_type: OrderSplitType,// Type of order splitting to perform
+    pub check_interval_secs: u64,        // Execution interval (seconds)
     pub slippage_tolerance: f64,         // Slippage tolerance
+}
+
+/// Order splitting strategy type
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub enum OrderSplitType {
+    NoSplit,                            // No splitting, single buy and sell
+    SplitBuy,                           // Split buy orders only
+    SplitSell,                          // Split sell orders only
+    SplitBoth,                          // Split both buy and sell orders
 }
 
 /// Factory canister response for strategy deployment
