@@ -229,26 +229,66 @@ fn get_strategy_wasm(strategy_type: StrategyType) -> Option<Vec<u8>> {
 // Helper function to collect deployment fee
 async fn collect_deployment_fee() -> Result<(), String> {
     let fee = DEPLOYMENT_FEE.with(|f| f.get());
-    // todo Refactor transfer logic, using user authorization for transactions
     if fee > 0 {
+        let caller_principal = caller();
         let ledger_id = Principal::from_text(ICP_LEDGER_CANISTER_ID).unwrap();
-        let factory_account = AccountIdentifier::new(&ic_cdk::id(), &DEFAULT_SUBACCOUNT);
+        let factory_id = ic_cdk::id();
         
-        let transfer_args = TransferArgs {
-            memo: Memo(0),
-            amount: Tokens::from_e8s(fee),
-            fee: Tokens::from_e8s(10_000), // 0.0001 ICP
-            from_subaccount: None,
-            to: factory_account,
-            created_at_time: None,
-        };
+        // Check if the user has approved enough tokens
+        let allowance_args = (
+            caller_principal, 
+            factory_id
+        );
         
-        let transfer_result = call(ledger_id, "transfer", (transfer_args,)).await;
-        if let Err((code, msg)) = transfer_result {
-            return Err(format!(
-                "Failed to collect deployment fee: code={:?}, message={}",
-                code, msg
-            ));
+        let allowance_result: CallResult<(u64,)> = call(ledger_id, "icrc2_allowance", (allowance_args,)).await;
+        
+        match allowance_result {
+            Ok((allowance,)) => {
+                if allowance < fee {
+                    return Err(format!(
+                        "Insufficient allowance. Required: {} ICP, Approved: {} ICP. Please approve more tokens using your wallet.",
+                        fee as f64 / 100_000_000.0,
+                        allowance as f64 / 100_000_000.0
+                    ));
+                }
+                
+                // User has approved enough tokens, transfer them
+                #[derive(CandidType)]
+                struct TransferFromArgs {
+                    spender_subaccount: Option<Vec<u8>>,
+                    from: Principal,
+                    to: Principal,
+                    amount: u64,
+                    fee: Option<u64>,
+                    memo: Option<Vec<u8>>,
+                    created_at_time: Option<u64>,
+                }
+                
+                let transfer_from_args = TransferFromArgs {
+                    spender_subaccount: None,
+                    from: caller_principal,
+                    to: factory_id,
+                    amount: fee,
+                    fee: Some(10_000), // 0.0001 ICP
+                    memo: Some(vec![]), // Optional memo
+                    created_at_time: None,
+                };
+                
+                let transfer_result: CallResult<(u64,)> = call(ledger_id, "icrc2_transfer_from", (transfer_from_args,)).await;
+                
+                if let Err((code, msg)) = transfer_result {
+                    return Err(format!(
+                        "Failed to collect deployment fee: code={:?}, message={}",
+                        code, msg
+                    ));
+                }
+            },
+            Err((code, msg)) => {
+                return Err(format!(
+                    "Failed to check token allowance: code={:?}, message={}. Please ensure you have approved the factory canister to use your tokens.",
+                    code, msg
+                ));
+            }
         }
     }
     
@@ -560,8 +600,8 @@ async fn deploy_self_hedging_strategy(config: SelfHedgingConfig) -> DeploymentRe
         status: StrategyStatus::Created,
         exchange: config.exchange,
         trading_pair: TradingPair {
-            base_token: config.primary_token.clone(),
-            quote_token: config.hedge_token.clone(),
+            base_token: config.trading_token.clone(),
+            quote_token: config.trading_token.clone(),
         },
     };
     
@@ -676,7 +716,7 @@ async fn create_strategy_canister() -> Result<Principal, String> {
         settings: Some(settings),
     };
     
-    let result = create_canister(args, 1_000_000_000_000u128).await;
+    let result = create_canister(args, 0u128).await;
     
     match result {
         Ok((record,)) => Ok(record.canister_id),
