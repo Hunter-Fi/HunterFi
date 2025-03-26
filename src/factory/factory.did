@@ -1,6 +1,12 @@
-type DeploymentResult = variant {
-  Success : principal;
-  Error : text;
+type TokenMetadata = record {
+  canister_id : principal;
+  symbol : text;
+  decimals : nat8;
+};
+
+type TradingPair = record {
+  base_token : TokenMetadata;
+  quote_token : TokenMetadata;
 };
 
 type Exchange = variant {
@@ -9,6 +15,47 @@ type Exchange = variant {
   Sonic;
   InfinitySwap;
   ICDex;
+};
+
+type StrategyType = variant {
+  DollarCostAveraging;
+  ValueAveraging;
+  FixedBalance;
+  LimitOrder;
+  SelfHedging;
+};
+
+type OrderType = variant {
+  Buy;
+  Sell;
+};
+
+type OrderSplitType = variant {
+  NoSplit;
+  SplitBuy;
+  SplitSell;
+  SplitBoth;
+};
+
+type StrategyStatus = variant {
+  Created;
+  Running;
+  Paused;
+  EmergencyStopped;
+  Terminated;
+};
+
+type DeploymentStatus = variant {
+  PendingPayment;
+  AuthorizationConfirmed;
+  PaymentReceived;
+  CanisterCreated;
+  CodeInstalled;
+  Initialized;
+  Deployed;
+  DeploymentFailed;
+  Refunding;
+  Refunded;
 };
 
 type StrategyMetadata = record {
@@ -21,31 +68,28 @@ type StrategyMetadata = record {
   trading_pair : TradingPair;
 };
 
-type StrategyStatus = variant {
-  Created;
-  Running;
-  Paused;
-  EmergencyStopped;
-  Terminated;
+type DeploymentRecord = record {
+  deployment_id : text;
+  strategy_type : StrategyType;
+  owner : principal;
+  fee_amount : nat64;
+  request_time : nat64;
+  status : DeploymentStatus;
+  canister_id : opt principal;
+  config_data : blob;
+  error_message : opt text;
+  last_updated : nat64;
 };
 
-type StrategyType = variant {
-  DollarCostAveraging;
-  ValueAveraging;
-  FixedBalance;
-  LimitOrder;
-  SelfHedging;
+type DeploymentRequest = record {
+  deployment_id : text;
+  fee_amount : nat64;
+  strategy_type : StrategyType;
 };
 
-type TokenMetadata = record {
-  canister_id : principal;
-  symbol : text;
-  decimals : nat8;
-};
-
-type TradingPair = record {
-  base_token : TokenMetadata;
-  quote_token : TokenMetadata;
+type DeploymentResult = variant {
+  Success : principal;
+  Error : text;
 };
 
 type DCAConfig = record {
@@ -76,11 +120,6 @@ type FixedBalanceConfig = record {
   slippage_tolerance : float64;
 };
 
-type OrderType = variant {
-  Buy;
-  Sell;
-};
-
 type LimitOrderConfig = record {
   exchange : Exchange;
   base_token : TokenMetadata;
@@ -93,10 +132,9 @@ type LimitOrderConfig = record {
 
 type SelfHedgingConfig = record {
   exchange : Exchange;
-  primary_token : TokenMetadata;
-  hedge_token : TokenMetadata;
-  hedge_ratio : float64;
-  price_change_threshold : float64;
+  trading_token : TokenMetadata;
+  transaction_size : nat;
+  order_split_type : OrderSplitType;
   check_interval_secs : nat64;
   slippage_tolerance : float64;
 };
@@ -106,35 +144,66 @@ type WasmModule = record {
   wasm_module : blob;
 };
 
+type UpgradeData = record {
+  owner_strategies : vec record { principal; vec principal };
+  admins : vec principal;
+};
+
 service : {
-  // Admin Management
+  // Admin functions
   add_admin : (principal) -> (variant { Ok; Err : text });
   remove_admin : (principal) -> (variant { Ok; Err : text });
   get_admins : () -> (vec principal) query;
   is_caller_admin : () -> (bool) query;
 
-  // Strategy Deployment
+  // WASM module management
+  install_strategy_wasm : (WasmModule) -> (variant { Ok; Err : text });
+  get_strategy_wasm : (StrategyType) -> (opt blob) query;
+
+  // Deployment fee management
+  set_deployment_fee : (nat64) -> (variant { Ok; Err : text });
+  get_deployment_fee : () -> (nat64) query;
+
+  // Strategy registry queries
+  get_strategies_by_owner : (principal) -> (vec StrategyMetadata) query;
+  get_all_strategies : () -> (vec StrategyMetadata) query;
+  get_strategy : (principal) -> (opt StrategyMetadata) query;
+  get_strategy_count : () -> (nat64) query;
+
+  // Deployment record management
+  get_deployment_records : () -> (vec DeploymentRecord) query;
+  get_my_deployment_records : () -> (vec DeploymentRecord) query;
+  get_deployment : (text) -> (opt DeploymentRecord) query;
+
+  // New deployment request API
+  request_dca_strategy : (DCAConfig) -> (variant { Ok : DeploymentRequest; Err : text });
+  request_value_avg_strategy : (ValueAvgConfig) -> (variant { Ok : DeploymentRequest; Err : text });
+  request_fixed_balance_strategy : (FixedBalanceConfig) -> (variant { Ok : DeploymentRequest; Err : text });
+  request_limit_order_strategy : (LimitOrderConfig) -> (variant { Ok : DeploymentRequest; Err : text });
+  request_self_hedging_strategy : (SelfHedgingConfig) -> (variant { Ok : DeploymentRequest; Err : text });
+
+  // Deployment confirmation
+  confirm_deployment : (text) -> (variant { Ok; Err : text });
+
+  // Legacy direct deployment functions (kept for backward compatibility)
   deploy_dca_strategy : (DCAConfig) -> (DeploymentResult);
   deploy_value_avg_strategy : (ValueAvgConfig) -> (DeploymentResult);
   deploy_fixed_balance_strategy : (FixedBalanceConfig) -> (DeploymentResult);
   deploy_limit_order_strategy : (LimitOrderConfig) -> (DeploymentResult);
   deploy_self_hedging_strategy : (SelfHedgingConfig) -> (DeploymentResult);
-  
-  // Strategy WASM Management
-  install_strategy_wasm : (WasmModule) -> (variant { Ok; Err : text });
-  get_strategy_wasm : (StrategyType) -> (opt blob) query;
-  
-  // Strategy Registry
-  get_strategies_by_owner : (principal) -> (vec StrategyMetadata) query;
-  get_all_strategies : () -> (vec StrategyMetadata) query;
-  get_strategy : (principal) -> (opt StrategyMetadata) query;
-  get_strategy_count : () -> (nat64) query;
-  
-  // Governance
-  set_deployment_fee : (nat64) -> (variant { Ok; Err : text });
-  get_deployment_fee : () -> (nat64) query;
-  withdraw_funds : (principal, nat64) -> (variant { Ok; Err : text });
-  
-  // Cycles Management
+
+  // Admin-only force execution
+  force_execute_deployment : (text) -> (variant { Ok : DeploymentResult; Err : text });
+
+  // Refund management
+  request_refund : (text) -> (variant { Ok; Err : text });
+
+  // Timer management functions (admin only)
+  restart_timers : () -> (variant { Ok; Err : text });
+  trigger_status_processing : () -> (variant { Ok; Err : text });
+  trigger_failed_deployment_processing : () -> (variant { Ok; Err : text });
+
+  // Cycles & funds management
   get_cycles_balance : () -> (nat64) query;
+  withdraw_icp : (principal, nat64) -> (variant { Ok; Err : text });
 } 

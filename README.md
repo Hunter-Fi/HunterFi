@@ -36,7 +36,6 @@ The following table shows the current integration status for various decentraliz
 | ICPSwap | ✅ Complete | Swaps, Liquidity Pools, Price Feeds | Full integration with all trading pairs |
 | KongSwap | 🔄 In Progress | Basic Swaps | Core functionality working, advanced features coming soon |
 | Sonic | 🔄 In Progress | Price Feeds | coming soon |
-| InfinitySwap | 🔍 Planned | - | coming soon |
 | ICDex | 🔍 Planned | - | coming soon |
 
 Legend:
@@ -46,70 +45,184 @@ Legend:
 
 ## 🏗️ System Architecture
 
+# Architecture Diagram
+```
+┌───────────┐     ┌─────────────────┐
+│  Factory  │◄────┤ User/Frontend   │
+└─────┬─────┘     └─────────────────┘
+      │
+      │ creates/manages
+      ▼
+┌─────────────────────────────────────┐
+│                                     │
+│         Strategy Canisters          │
+│                                     │
+├─────────┬─────────┬─────────┬───────┤
+│   DCA   │ Value   │ Fixed   │ Limit │
+│         │ Avg     │ Balance │ Order │
+└────┬────┴────┬────┴────┬────┴───┬───┘
+     │         │         │        │
+     │         │         │        │
+     ▼         ▼         ▼        ▼
+┌────────────────────────────────────┐
+│        Exchange Interface          │
+├────────────┬───────────────────────┤
+│  ICPSwap   │       KongSwap        │
+└────────────┴───────────────────────┘
+      │                │
+      ▼                ▼
+┌────────────┐   ┌───────────┐
+│  ICPSwap   │   │  KongSwap │
+│  Canister  │   │  Canister │
+└────────────┘   └───────────┘
+```
+
 HunterFi employs a modular design, primarily consisting of the following components:
 
 ### Core Components
 
 #### Factory Canister (factory)
 
-As the platform entry point, it is responsible for:
-- **Strategy Deployment Management**: Creates new strategy canisters
-- **Deployment Fee Collection**: Charges 1 ICP per deployment as a platform fee
-- **Strategy Registry Maintenance**: Records and indexes all deployed strategies
+HunterFi is a decentralized finance strategy platform that enables users to deploy and manage automated trading strategies on the Internet Computer. The Factory Canister is responsible for strategy creation, deployment, and management.
 
-#### Strategy Common Library (strategy_common)
+## Deployment Process
 
-A core library providing shared functionality and type definitions for all strategies, containing four main modules:
-- **types**: Defines shared data structures and enumerated types
-- **timer**: Manages timed execution functions
-- **cycles**: Provides cycles management functionality
-- **exchange**: Defines exchange interfaces
+HunterFi implements a two-phase deployment process based on ICRC2 standard to address the non-atomic nature of ICP transactions:
 
-#### Strategy Canisters
+### Phase One: Deployment Preparation
 
-Each strategy is implemented as an independent canister with common features including:
-- **Initialization and Configuration**
-- **Start/Pause Execution**
-- **Strategy Logic Execution**
-- **Transaction History Recording**
-- **Cycles Management**
+1. **Create Deployment Request**
+   - User submits strategy type and configuration
+   - System generates a unique deployment ID and returns fee information
+   - Status is marked as `PendingPayment`
 
-### Strategy Types
+2. **User Payment Authorization**
+   - User calls `icrc2_approve` through their wallet to authorize the Factory Canister to use a specified amount of ICP
+   - User confirms deployment intent by submitting the deployment_id
+   - System verifies the authorization amount is sufficient
+   - Status is updated to `AuthorizationConfirmed`
 
-#### Dollar Cost Averaging Strategy (strategy_dca)
+### Phase Two: Deployment Execution
 
-Implements the dollar-cost averaging method, periodically investing a fixed amount.
-- **Periodic Trades**: Executes at fixed time intervals
-- **Fixed Investment Amount**: Uses a preset amount to purchase assets
-- **User Controls**: Allows starting, pausing, and managing execution
+1. **Fee Collection and Canister Creation**
+   - System calls `icrc2_transfer_from` to collect the fee
+   - Creates new Canister and sets controller permissions
+   - Installs the appropriate WASM module for the strategy type
+   - Status progresses through `PaymentReceived` -> `CanisterCreated` -> `CodeInstalled`
 
-#### Value Averaging Strategy (strategy_value_avg)
+2. **Initialization and Completion**
+   - Initializes the strategy with user-provided configuration
+   - Records strategy metadata
+   - Status progresses to `Initialized` -> `Deployed`
 
-Periodic investment based on the target growth curve of account value.
-- **Performance-Based Investment**: Determines investment amount based on actual account performance
-- **Target Growth Curve**: Ensures account value grows according to a predetermined trajectory
-- **Dynamic Adjustments**: Increases investment when below target, decreases when above target
+3. **Error Handling**
+   - If deployment fails, status is set to `DeploymentFailed`
+   - Refund process is initiated, status updates to `Refunding` -> `Refunded`
 
-#### Fixed Balance Strategy (strategy_fixed_balance)
+## State Management
 
-Maintains a constant account balance through periodic fund allocation adjustments.
-- **Regular Monitoring**: Periodically checks account balance
-- **Automated Adjustments**: Executes buy or sell operations to adjust to target value
-- **Stability-Oriented**: Suitable for investors seeking stability amid market fluctuations
+The system monitors deployment states through scheduled tasks, handling:
+- Timed-out deployment requests
+- Post-payment incomplete deployments
+- Failed deployment refunds
+- Refund retries
 
-#### Limit Order Strategy (strategy_limit_order)
+## Main Interfaces
 
-Implements limit order functionality, allowing users to set specific prices for buying or selling assets.
-- **Continuous Market Monitoring**: Monitors prices reaching preset conditions
-- **Automated Execution**: Automatically trades when conditions are met
-- **Multiple Condition Support**: Supports setting multiple buy/sell conditions
+### Deployment Request Interfaces
+- `request_dca_strategy`: Request to deploy a Dollar Cost Averaging strategy
+- `request_value_avg_strategy`: Request to deploy a Value Averaging strategy
+- `request_fixed_balance_strategy`: Request to deploy a Fixed Balance strategy
+- `request_limit_order_strategy`: Request to deploy a Limit Order strategy
+- `request_self_hedging_strategy`: Request to deploy a Self-Hedging strategy
 
-#### Self-Hedging Strategy (strategy_self_hedging)
+### Deployment Confirmation and Management
+- `confirm_deployment`: Confirm authorization and execute deployment
+- `get_deployment`: Retrieve deployment record
+- `get_my_deployment_records`: Get user's deployment records
+- `request_refund`: Request a refund
 
-System acts as both buyer and seller to increase trading volume for a specific asset.
-- **Self-Trading Operations**: Executes synchronized buying and selling operations
-- **Preset Frequencies and Amounts**: Operates at predetermined frequency and trade sizes
-- **Configurable Parameters**: Users can configure trading frequency, quantity, and price range
+### Strategy Management
+- `get_strategy`: Get strategy information
+- `get_strategies_by_owner`: Get user's strategy list
+- `get_all_strategies`: Get all strategies
+
+### Admin Functions
+- `set_deployment_fee`: Set deployment fee
+- `install_strategy_wasm`: Install strategy WASM module
+- `add_admin`: Add an admin
+- `remove_admin`: Remove an admin
+- `restart_timers`: Restart scheduled tasks
+- `withdraw_icp`: Withdraw ICP from the canister
+
+## Usage Example
+
+### 1. Deploying a DCA Strategy
+```javascript
+// 1. Create deployment request
+const deploymentRequest = await factory.request_dca_strategy({
+  exchange: { ICPSwap: null },
+  base_token: { canister_id: Principal.fromText("..."), symbol: "ICP", decimals: 8 },
+  quote_token: { canister_id: Principal.fromText("..."), symbol: "USDC", decimals: 6 },
+  amount_per_execution: 10_000_000n, // 0.1 ICP
+  interval_secs: 86400n, // Execute daily
+  max_executions: [30n], // Execute 30 times
+  slippage_tolerance: 0.5 // 0.5% slippage tolerance
+});
+
+// 2. Authorize Factory to use ICP
+await icpLedger.icrc2_approve({
+  spender: { owner: factoryCanisterId },
+  amount: deploymentRequest.fee_amount,
+  expires_at: [] // No expiration
+});
+
+// 3. Confirm deployment
+await factory.confirm_deployment(deploymentRequest.deployment_id);
+
+// 4. Query deployment status
+const status = await factory.get_deployment(deploymentRequest.deployment_id);
+```
+
+## Security Features
+
+1. **State Tracking**: Complete deployment state tracking for transparency
+2. **Scheduled Monitoring**: Automatic handling of deployments stuck in intermediate states
+3. **Refund Mechanism**: Automatic refund process for failed deployments
+4. **Permission Control**: Strict admin permissions system
+5. **Unique IDs**: Each deployment request has a unique ID to prevent duplicate processing
+
+## Strategy Types
+
+### Dollar Cost Averaging Strategy (strategy_dca)
+- Implements the dollar-cost averaging method, periodically investing a fixed amount
+- Executes trades at fixed time intervals
+- Uses a preset amount to purchase assets
+- Allows starting, pausing, and managing execution
+
+### Value Averaging Strategy (strategy_value_avg)
+- Adjusts investment based on performance relative to a target growth curve
+- Determines investment amount based on actual account performance
+- Maintains account value growth according to a predetermined trajectory
+- Dynamically increases investment when below target, decreases when above target
+
+### Fixed Balance Strategy (strategy_fixed_balance)
+- Maintains a constant account balance through periodic rebalancing
+- Regularly monitors account balance
+- Executes buy or sell operations to adjust to target value
+- Suitable for investors seeking stability amid market fluctuations
+
+### Limit Order Strategy (strategy_limit_order)
+- Implements limit order functionality for specific price points
+- Continuously monitors market prices
+- Automatically executes trades when conditions are met
+- Supports setting multiple buy/sell conditions
+
+### Self-Hedging Strategy (strategy_self_hedging)
+- Creates balanced buying and selling operations to increase trading volume
+- Executes synchronized buying and selling transactions
+- Operates at predetermined frequency and trade sizes
+- Allows configuration of trading frequency, quantity, and price range
 
 ## 🔧 Technology Stack
 

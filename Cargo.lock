@@ -176,12 +176,7 @@ dependencies = [
  "async-trait",
  "candid",
  "ic-cdk",
- "ic-cdk-macros",
- "ic-cdk-timers",
- "ic-ledger-types",
- "ic-stable-structures",
  "serde",
- "serde_bytes",
  "strategy_common",
 ]
 
@@ -190,11 +185,9 @@ name = "factory"
 version = "0.1.0"
 dependencies = [
  "candid",
- "exchange",
  "ic-cdk",
  "ic-cdk-macros",
  "ic-cdk-timers",
- "ic-ledger-types",
  "ic-stable-structures",
  "serde",
  "serde_bytes",
@@ -601,10 +594,8 @@ dependencies = [
  "async-trait",
  "candid",
  "ic-cdk",
- "ic-cdk-macros",
  "ic-cdk-timers",
  "ic-ledger-types",
- "ic-stable-structures",
  "serde",
  "serde_bytes",
 ]
@@ -664,16 +655,11 @@ dependencies = [
 name = "strategy_self_hedging"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "candid",
- "exchange",
  "ic-cdk",
  "ic-cdk-macros",
- "ic-cdk-timers",
- "ic-ledger-types",
  "ic-stable-structures",
  "serde",
- "serde_bytes",
  "strategy_common",
 ]
 
