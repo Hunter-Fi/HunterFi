@@ -1,5 +1,5 @@
 use candid::Principal;
-use ic_cdk::api::{caller, time};
+use ic_cdk::api::{caller};
 use ic_cdk_macros::{init, post_upgrade, pre_upgrade, query, update};
 use strategy_common::types::{
     DCAConfig, DeploymentRecord, DeploymentRequest, DeploymentResult,

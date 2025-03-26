@@ -1,11 +1,9 @@
 use candid::{Principal, CandidType};
 use ic_cdk::api::call::{call, CallResult};
-use ic_cdk::api::management_canister::main::{
-    canister_status, create_canister, install_code, CanisterInstallMode, CanisterSettings,
+use ic_cdk::api::management_canister::main::{create_canister, install_code, CanisterInstallMode, CanisterSettings,
     CreateCanisterArgument, InstallCodeArgument,
 };
 use ic_cdk::api::{caller, time};
-use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use strategy_common::types::{
     DeploymentRecord, DeploymentRequest, DeploymentResult, DeploymentStatus, DCAConfig, 

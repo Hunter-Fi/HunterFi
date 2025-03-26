@@ -6,8 +6,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::time::Duration;
 use ic_cdk_timers::TimerId;
-use std::rc::Rc;
-use strategy_common::types::{DeploymentRecord, DeploymentStatus};
+use strategy_common::types::{DeploymentStatus};
 
 use crate::state::{ICP_LEDGER_CANISTER_ID, get_deployment_record, update_deployment_status};
 

@@ -1,6 +1,5 @@
 use ic_cdk_timers::TimerId;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::time::Duration;
 use strategy_common::types::DeploymentStatus;
 
