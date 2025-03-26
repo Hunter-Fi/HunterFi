@@ -5,7 +5,7 @@ use strategy_common::types::DeploymentStatus;
 
 use crate::state::{
     get_all_deployment_records, get_deployment_records_by_status, 
-    RefundStatus, update_deployment_status, update_refund_status
+    RefundStatus, update_deployment_status, update_refund_status, ExtendedDeploymentRecord
 };
 use crate::payment::process_refund;
 
@@ -17,11 +17,13 @@ const CANISTER_CREATED_TIMEOUT: u64 = 1 * 60 * 60; // 1 hour
 const CODE_INSTALLED_TIMEOUT: u64 = 1 * 60 * 60;   // 1 hour
 const INITIALIZED_TIMEOUT: u64 = 30 * 60;          // 30 minutes
 const REFUNDING_TIMEOUT: u64 = 30 * 60;            // 30 minutes
-const CLEANUP_INTERVAL: u64 = 12 * 60 * 60;        // 12 hours
+const CLEANUP_INTERVAL: u64 = 6 * 60 * 60;        // 6 hours
 
 // Period for processing tasks (in milliseconds)
 const PROCESSING_INTERVAL_MS: u64 = 15 * 60 * 1000; // 15 minutes
 const REFUND_PROCESSING_INTERVAL_MS: u64 = 5 * 60 * 1000; // 5 minutes
+// Maximum number of refunds to process per batch
+const MAX_REFUNDS_PER_BATCH: usize = 3;
 
 thread_local! {
     // Timer ID for the status processing task
@@ -133,95 +135,149 @@ pub async fn process_deployment_statuses() {
     let current_time = ic_cdk::api::time();
     
     for record in records {
-        // Skip already completed statuses
-        match record.status {
-            DeploymentStatus::Deployed | 
-            DeploymentStatus::Refunded => continue,
-            _ => {}
-        }
-        
-        let elapsed_seconds = (current_time - record.last_updated) / 1_000_000_000;
-        
-        match record.status {
-            // Handle PendingPayment timeout
-            DeploymentStatus::PendingPayment if elapsed_seconds > PENDING_PAYMENT_TIMEOUT => {
-                // Mark as failed without refund (no payment was made)
-                let _ = update_deployment_status(
-                    &record.deployment_id,
-                    DeploymentStatus::DeploymentFailed,
-                    None,
-                    Some("Payment timeout exceeded".to_string())
-                );
-            },
-            
-            // Handle AuthorizationConfirmed timeout
-            DeploymentStatus::AuthorizationConfirmed if elapsed_seconds > AUTHORIZATION_TIMEOUT => {
-                // Mark as failed and don't attempt to process payment
-                let _ = update_deployment_status(
-                    &record.deployment_id,
-                    DeploymentStatus::DeploymentFailed,
-                    None,
-                    Some("Authorization timeout exceeded".to_string())
-                );
-            },
-            
-            // Handle PaymentReceived but stuck in this state
-            DeploymentStatus::PaymentReceived if elapsed_seconds > PAYMENT_RECEIVED_TIMEOUT => {
-                // Mark as failed and trigger refund
-                let _ = update_deployment_status(
-                    &record.deployment_id,
-                    DeploymentStatus::DeploymentFailed,
-                    None,
-                    Some("Payment received but deployment not started in time".to_string())
-                );
-                
-                // Mark for refund but don't process immediately
-                let _ = update_refund_status(
-                    &record.deployment_id,
-                    RefundStatus::NotStarted
-                );
-                
-                // Refund will be processed by the refund timer
-            },
-            
-            // Handle other intermediate states
-            DeploymentStatus::CanisterCreated if elapsed_seconds > CANISTER_CREATED_TIMEOUT => {
-                ic_cdk::println!("CanisterCreated timeout exceeded for deployment {}", record.deployment_id);
-                // Continue with process instead of failing - this could be handled by deployment process
-                // todo install code
-            },
-            
-            DeploymentStatus::CodeInstalled if elapsed_seconds > CODE_INSTALLED_TIMEOUT => {
-                ic_cdk::println!("CodeInstalled timeout exceeded for deployment {}", record.deployment_id);
-                // Continue with process instead of failing - this could be handled by deployment process
-                // todo Initializ
-            },
-            
-            DeploymentStatus::Initialized if elapsed_seconds > INITIALIZED_TIMEOUT => {
-                ic_cdk::println!("Initialized timeout exceeded for deployment {}", record.deployment_id);
-                // Continue with process instead of failing - this could be handled by deployment process
-                //todo Deployed
-            },
-            
-            _ => {}
+        // Use a try-catch pattern to prevent one record error from affecting others
+        match process_single_deployment_status(&record, current_time).await {
+            Ok(_) => {},
+            Err(e) => {
+                ic_cdk::println!("Error processing deployment status for {}: {}", record.deployment_id, e);
+                // Continue with next record
+            }
         }
     }
 }
 
+/// Process a single deployment record (extracted for better error handling)
+async fn process_single_deployment_status(record: &ExtendedDeploymentRecord, current_time: u64) -> Result<(), String> {
+    // Skip already completed statuses
+    match record.status {
+        DeploymentStatus::Deployed | 
+        DeploymentStatus::Refunded => return Ok(()),
+        _ => {}
+    }
+    
+    let elapsed_seconds = (current_time - record.last_updated) / 1_000_000_000;
+    
+    match record.status {
+        // Handle PendingPayment timeout
+        DeploymentStatus::PendingPayment if elapsed_seconds > PENDING_PAYMENT_TIMEOUT => {
+            // Mark as failed without refund (no payment was made)
+            update_deployment_status(
+                &record.deployment_id,
+                DeploymentStatus::DeploymentFailed,
+                None,
+                Some("Payment timeout exceeded".to_string())
+            )?;
+        },
+        
+        // Handle AuthorizationConfirmed timeout
+        DeploymentStatus::AuthorizationConfirmed if elapsed_seconds > AUTHORIZATION_TIMEOUT => {
+            // Mark as failed and don't attempt to process payment
+            update_deployment_status(
+                &record.deployment_id,
+                DeploymentStatus::DeploymentFailed,
+                None,
+                Some("Authorization timeout exceeded".to_string())
+            )?;
+        },
+        
+        // Handle PaymentReceived but stuck in this state
+        DeploymentStatus::PaymentReceived if elapsed_seconds > PAYMENT_RECEIVED_TIMEOUT => {
+            // Mark as failed and trigger refund
+            update_deployment_status(
+                &record.deployment_id,
+                DeploymentStatus::DeploymentFailed,
+                None,
+                Some("Payment received but deployment not started in time".to_string())
+            )?;
+            
+            // Mark for refund but don't process immediately
+            update_refund_status(
+                &record.deployment_id,
+                RefundStatus::NotStarted
+            )?;
+            
+            // Refund will be processed by the refund timer
+        },
+        
+        // Handle other intermediate states
+        DeploymentStatus::CanisterCreated if elapsed_seconds > CANISTER_CREATED_TIMEOUT => {
+            ic_cdk::println!("CanisterCreated timeout exceeded for deployment {}", record.deployment_id);
+            // Mark as failed and trigger refund
+            update_deployment_status(
+                &record.deployment_id,
+                DeploymentStatus::DeploymentFailed,
+                None,
+                Some("Canister created but deployment timed out".to_string())
+            )?;
+            
+            // Mark for refund
+            update_refund_status(
+                &record.deployment_id,
+                RefundStatus::NotStarted
+            )?;
+        },
+        
+        DeploymentStatus::CodeInstalled if elapsed_seconds > CODE_INSTALLED_TIMEOUT => {
+            ic_cdk::println!("CodeInstalled timeout exceeded for deployment {}", record.deployment_id);
+            // Mark as failed and trigger refund
+            update_deployment_status(
+                &record.deployment_id,
+                DeploymentStatus::DeploymentFailed,
+                None,
+                Some("Code installed but initialization timed out".to_string())
+            )?;
+            
+            // Mark for refund
+            update_refund_status(
+                &record.deployment_id,
+                RefundStatus::NotStarted
+            )?;
+        },
+        
+        DeploymentStatus::Initialized if elapsed_seconds > INITIALIZED_TIMEOUT => {
+            ic_cdk::println!("Initialized timeout exceeded for deployment {}", record.deployment_id);
+            // Mark as failed and trigger refund
+            update_deployment_status(
+                &record.deployment_id,
+                DeploymentStatus::DeploymentFailed,
+                None,
+                Some("Initialization completed but final deployment timed out".to_string())
+            )?;
+            
+            // Mark for refund
+            update_refund_status(
+                &record.deployment_id,
+                RefundStatus::NotStarted
+            )?;
+        },
+        
+        _ => {}
+    }
+    
+    Ok(())
+}
+
 /// Process all refunds (consolidated function for all refund processing)
 pub async fn process_refunds() {
-    // Process deployments that are marked for refund but not started yet
-    process_pending_refunds().await;
+    // Wrap each process in a try-catch to continue even if one fails
+    match process_pending_refunds().await {
+        Ok(_) => {},
+        Err(e) => ic_cdk::println!("Error processing pending refunds: {}", e)
+    }
     
-    // Process deployments that are in the refunding state
-    process_refunding_deployments().await;
+    match process_refunding_deployments().await {
+        Ok(_) => {},
+        Err(e) => ic_cdk::println!("Error processing refunding deployments: {}", e)
+    }
     
-    // Process deployments that failed but haven't been marked for refund
-    process_failed_deployments().await;
+    match process_failed_deployments().await {
+        Ok(_) => {},
+        Err(e) => ic_cdk::println!("Error processing failed deployments: {}", e)
+    }
 }
 
 /// Process deployments that are marked for refund but not started yet
-async fn process_pending_refunds() {
+async fn process_pending_refunds() -> Result<(), String> {
     // This targets records with NotStarted refund status
     let refunding_records = get_all_deployment_records()
         .into_iter()
@@ -231,8 +287,9 @@ async fn process_pending_refunds() {
         })
         .collect::<Vec<_>>();
     
-    for record in refunding_records {
-        // Process at most one refund at a time to avoid overwhelming the system
+    // Process a limited number of refunds per batch
+    let batch_size = std::cmp::min(refunding_records.len(), MAX_REFUNDS_PER_BATCH);
+    for record in refunding_records.into_iter().take(batch_size) {
         let deployment_id = record.deployment_id.clone();
         
         match process_refund(&deployment_id).await {
@@ -244,14 +301,13 @@ async fn process_pending_refunds() {
                 // Will be retried by the timer
             }
         }
-        
-        // Only process one per interval to avoid system overload
-        break;
     }
+    
+    Ok(())
 }
 
 /// Process all records in DeploymentFailed state to attempt refunds
-pub async fn process_failed_deployments() {
+pub async fn process_failed_deployments() -> Result<(), String> {
     // This targets records that are in failed state but have no refund status yet
     let failed_deployments = get_deployment_records_by_status(DeploymentStatus::DeploymentFailed)
         .into_iter()
@@ -283,10 +339,12 @@ pub async fn process_failed_deployments() {
         // Process at most one record per interval
         break;
     }
+    
+    Ok(())
 }
 
 /// Process all records in Refunding state to continue refund attempts
-pub async fn process_refunding_deployments() {
+pub async fn process_refunding_deployments() -> Result<(), String> {
     let refunding_deployments = get_deployment_records_by_status(DeploymentStatus::Refunding)
         .into_iter()
         .filter(|record| {
@@ -300,9 +358,9 @@ pub async fn process_refunding_deployments() {
         })
         .collect::<Vec<_>>();
     
-    if !refunding_deployments.is_empty() {
-        // Process at most one refund at a time
-        let record = &refunding_deployments[0];
+    // Process a limited number of refunds per batch
+    let batch_size = std::cmp::min(refunding_deployments.len(), MAX_REFUNDS_PER_BATCH);
+    for (i, record) in refunding_deployments.into_iter().take(batch_size).enumerate() {
         let deployment_id = record.deployment_id.clone();
         
         match process_refund(&deployment_id).await {
@@ -315,23 +373,37 @@ pub async fn process_refunding_deployments() {
             }
         }
     }
+    
+    Ok(())
 }
 
 /// Cleanup old completed records (optional, based on system requirements)
 async fn cleanup_old_records() {
-    // This could archive or delete very old records that are already completed
-    // (Deployed or Refunded) and are beyond a certain age
-    
-    // For now, we're just logging
-    let completed_count = get_all_deployment_records()
-        .into_iter()
-        .filter(|record| 
-            record.status == DeploymentStatus::Deployed || 
-            record.status == DeploymentStatus::Refunded
-        )
-        .count();
-    
-    ic_cdk::println!("Cleanup check: Found {} completed records", completed_count);
+    // Check if archiving is needed based on memory usage threshold
+    if crate::state::should_archive_records() {
+        // Archive old records that are completed and beyond retention period
+        match crate::state::archive_old_deployment_records() {
+            Ok(count) => {
+                if count > 0 {
+                    ic_cdk::println!("Archived {} old completed records", count);
+                }
+            },
+            Err(e) => {
+                ic_cdk::println!("Error archiving old records: {}", e);
+            }
+        }
+    } else {
+        // Just log count for monitoring
+        let completed_count = get_all_deployment_records()
+            .into_iter()
+            .filter(|record| 
+                record.status == DeploymentStatus::Deployed || 
+                record.status == DeploymentStatus::Refunded
+            )
+            .count();
+        
+        ic_cdk::println!("Cleanup check: Found {} completed records", completed_count);
+    }
 }
 
 /// Reset and restart all timers

@@ -22,6 +22,17 @@ pub const DEFAULT_DEPLOYMENT_FEE: u64 = 100_000_000; // 1 ICP in e8s
 // Maximum number of refund attempts
 pub const MAX_REFUND_ATTEMPTS: u8 = 5;
 
+// Constants for record archiving
+// Record retention period (in nanoseconds)
+pub const COMPLETED_RECORD_RETENTION_DAYS: u64 = 90; // 90 days
+pub const RETENTION_PERIOD_NS: u64 = COMPLETED_RECORD_RETENTION_DAYS * 24 * 60 * 60 * 1_000_000_000;
+
+// Maximum number of completed records to maintain
+pub const MAX_COMPLETED_RECORDS: usize = 10000;
+
+// Archiving threshold percentage (start archiving when memory usage > 80%)
+pub const ARCHIVING_THRESHOLD_PERCENT: u8 = 80;
+
 // Refund status for tracking refund process
 #[derive(Clone, Debug, PartialEq, Eq, CandidType, Deserialize)]
 pub enum RefundStatus {
@@ -485,6 +496,93 @@ pub fn get_deployment_records_by_refund_status(refund_status: &RefundStatus) -> 
         .into_iter()
         .filter(|record| record.refund_status.as_ref() == Some(refund_status))
         .collect()
+}
+
+// Archive old completed deployment records
+pub fn archive_old_deployment_records() -> Result<usize, String> {
+    let current_time = ic_cdk::api::time();
+    let mut archived_count = 0;
+    
+    // First get all completed records to analyze
+    let completed_records: Vec<_> = get_all_deployment_records()
+        .into_iter()
+        .filter(|record| 
+            record.status == DeploymentStatus::Deployed || 
+            record.status == DeploymentStatus::Refunded
+        )
+        .collect();
+    
+    // Sort by completion time (last_updated for completed records)
+    let mut sorted_records = completed_records.clone();
+    sorted_records.sort_by(|a, b| a.last_updated.cmp(&b.last_updated));
+    
+    // If we have more than MAX_COMPLETED_RECORDS, archive the oldest ones
+    let excess_count = if sorted_records.len() > MAX_COMPLETED_RECORDS {
+        sorted_records.len() - MAX_COMPLETED_RECORDS
+    } else {
+        0
+    };
+    
+    // Also archive records older than retention period
+    let retention_threshold = current_time.saturating_sub(RETENTION_PERIOD_NS);
+    
+    // Collect records to archive
+    let records_to_archive: Vec<_> = sorted_records.into_iter()
+        .enumerate()
+        .filter(|(index, record)| {
+            // Archive if it's in the excess count OR older than retention threshold
+            *index < excess_count || record.last_updated < retention_threshold
+        })
+        .map(|(_, record)| record.deployment_id.clone())
+        .collect();
+    
+    // Archive each record
+    for deployment_id in records_to_archive {
+        // First serialize to secondary storage if needed
+        // For now, we'll just delete but in production you might want to:
+        // 1. Serialize to a stable-backed archive BTreeMap with different memory ID
+        // 2. Or export to another canister designated for archiving
+
+        // Remove from main storage
+        DEPLOYMENT_RECORDS.with(|records| {
+            let mut records = records.borrow_mut();
+            let key = DeploymentIdBytes(deployment_id.as_bytes().to_vec());
+            if records.remove(&key).is_some() {
+                archived_count += 1;
+            }
+        });
+    }
+    
+    ic_cdk::println!("Archived {} completed deployment records", archived_count);
+    Ok(archived_count)
+}
+
+// Estimate stable memory usage percentage
+pub fn get_memory_usage_percent() -> u8 {
+    // This is a simplified estimate - in production you would want to get
+    // actual memory usage from the memory manager
+    let total_records = DEPLOYMENT_RECORDS.with(|records| records.borrow().len());
+    
+    // Roughly estimate memory usage: 
+    // Assume each record uses about 500 bytes including keys
+    let estimated_memory_usage = total_records * 500;
+    
+    // Assuming 4GB stable memory maximum
+    let max_memory = 10 * 1024 * 1024 * 1024;
+    
+    // Calculate percentage
+    let percentage = (estimated_memory_usage as f64 / max_memory as f64 * 100.0) as u8;
+    
+    percentage.min(100)
+}
+
+// Check if archiving is needed
+pub fn should_archive_records() -> bool {
+    // Check if memory usage is above threshold
+    let usage_percent = get_memory_usage_percent();
+    
+    // Archive if above threshold
+    usage_percent > ARCHIVING_THRESHOLD_PERCENT
 }
 
 // Upgrade data structure

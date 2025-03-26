@@ -6,15 +6,9 @@ use strategy_common::types::{
     DeploymentStatus, FixedBalanceConfig, LimitOrderConfig, SelfHedgingConfig,
     StrategyMetadata, StrategyType, ValueAvgConfig,
 };
-
-use crate::deployment::{
-    confirm_deployment_authorization, create_dca_request, create_fixed_balance_request,
-    create_limit_order_request, create_self_hedging_request, create_value_avg_request,
-    execute_deployment,
-};
 use crate::payment::{process_refund, schedule_refunds_for_failed_deployments, withdraw_funds};
 use crate::state::{get_all_basic_deployment_records, get_deployment_record, get_deployment_records_by_owner, get_fee, get_strategy_metadata, get_upgrade_data, get_wasm_module, is_admin, require_admin, restore_upgrade_data, set_fee, store_wasm_module, update_deployment_status, update_refund_status, ExtendedDeploymentRecord, RefundStatus, MAX_REFUND_ATTEMPTS};
-use crate::timer;
+use crate::{deployment_manager, timer};
 use crate::state::WasmModule;
 
 // Initialization
@@ -194,39 +188,44 @@ fn get_deployment(deployment_id: String) -> Option<ExtendedDeploymentRecord> {
 // Strategy deployment requests
 #[update]
 async fn request_dca_strategy(config: DCAConfig) -> Result<DeploymentRequest, String> {
-    create_dca_request(config).await
+    deployment_manager::create_strategy_request(config).await
 }
 
 #[update]
 async fn request_value_avg_strategy(config: ValueAvgConfig) -> Result<DeploymentRequest, String> {
-    create_value_avg_request(config).await
+    deployment_manager::create_strategy_request(config).await
 }
 
 #[update]
 async fn request_fixed_balance_strategy(config: FixedBalanceConfig) -> Result<DeploymentRequest, String> {
-    create_fixed_balance_request(config).await
+    deployment_manager::create_strategy_request(config).await
 }
 
 #[update]
 async fn request_limit_order_strategy(config: LimitOrderConfig) -> Result<DeploymentRequest, String> {
-    create_limit_order_request(config).await
+    deployment_manager::create_strategy_request(config).await
 }
 
 #[update]
 async fn request_self_hedging_strategy(config: SelfHedgingConfig) -> Result<DeploymentRequest, String> {
-    create_self_hedging_request(config).await
+    deployment_manager::create_strategy_request(config).await
 }
 
 // Deployment authorization and execution
 #[update]
 async fn confirm_deployment(deployment_id: String) -> Result<(), String> {
-    confirm_deployment_authorization(&deployment_id).await
+    deployment_manager::authorize_deployment(&deployment_id).await
+}
+
+#[update]
+async fn cancel_deployment(deployment_id: String) -> Result<(), String> {
+    deployment_manager::cancel_deployment(&deployment_id)
 }
 
 #[update]
 async fn force_execute_deployment(deployment_id: String) -> Result<DeploymentResult, String> {
     require_admin()?;
-    execute_deployment(&deployment_id).await
+    deployment_manager::execute_deployment(&deployment_id).await
 }
 
 // Refund management
@@ -376,8 +375,14 @@ async fn trigger_status_processing() -> Result<(), String> {
 #[update]
 async fn trigger_failed_deployment_processing() -> Result<(), String> {
     require_admin()?;
-    ic_cdk::spawn(timer::process_failed_deployments());
+    timer::process_failed_deployments().await?;
     Ok(())
+}
+
+#[update]
+async fn trigger_cleanup() -> Result<usize, String> {
+    require_admin()?;
+    crate::state::archive_old_deployment_records()
 }
 
 // Cycles and funds management

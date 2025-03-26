@@ -109,14 +109,17 @@ pub async fn collect_fee(deployment_id: &str) -> Result<(), String> {
             DeploymentStatus::AuthorizationConfirmed
         ));
     }
-    
-    // Update status to processing
-    update_deployment_status(
-        deployment_id, 
-        DeploymentStatus::PaymentReceived, 
-        None, 
-        None
-    )?;
+
+    if record.fee_amount == 0 {
+        // Skip fee collection if fee is zero
+        update_deployment_status(
+            deployment_id,
+            DeploymentStatus::PaymentReceived,
+            None,
+            None
+        )?;
+        return Ok(());
+    }
     
     let ledger_id = Principal::from_text(ICP_LEDGER_CANISTER_ID)
         .map_err(|_| "Invalid ICP ledger ID".to_string())?;
@@ -310,12 +313,34 @@ async fn process_refund_internal(deployment_id: &str) -> Result<(), String> {
                 _ => 1,
             };
             
-            if attempts < MAX_REFUND_ATTEMPTS {
+            // Analyze the error for permanent vs. temporary failures
+            let is_permanent_error = match code {
+                // Check for permanent errors based on reject codes
+                ic_cdk::api::call::RejectionCode::CanisterError => 
+                    message.contains("insufficient funds") || message.contains("invalid recipient"),
+                ic_cdk::api::call::RejectionCode::DestinationInvalid => true,
+                _ => false
+            };
+            
+            if is_permanent_error {
+                // Don't retry for permanent errors
+                update_refund_status(
+                    deployment_id,
+                    RefundStatus::Failed { reason: format!("Permanent error: {}", error) }
+                )?;
+                
+                Err(format!("Permanent refund error: {}", error))
+            } else if attempts < MAX_REFUND_ATTEMPTS {
+                // Only schedule retry for temporary errors
+                // Log detailed error information
+                ic_cdk::println!("Temporary refund error (attempt {}/{}): Code={:?}, Message={}", 
+                               attempts, MAX_REFUND_ATTEMPTS, code, message);
+                               
                 // Schedule retry with exponential backoff
                 schedule_refund_retry(deployment_id.to_string(), attempts);
                 Err(error)
             } else {
-                // Mark as permanently failed
+                // Mark as permanently failed after max attempts
                 update_refund_status(
                     deployment_id,
                     RefundStatus::Failed { reason: error.clone() }
