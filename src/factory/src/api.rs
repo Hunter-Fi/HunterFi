@@ -13,8 +13,9 @@ use crate::deployment::{
     execute_deployment,
 };
 use crate::payment::{process_refund, schedule_refunds_for_failed_deployments, withdraw_funds};
-use crate::state::{get_all_deployment_records, get_deployment_record, get_deployment_records_by_owner, get_fee, get_strategy_metadata, get_upgrade_data, get_wasm_module, is_admin, require_admin, restore_upgrade_data, set_fee, store_wasm_module, WasmModule};
+use crate::state::{get_all_basic_deployment_records, get_deployment_record, get_deployment_records_by_owner, get_fee, get_strategy_metadata, get_upgrade_data, get_wasm_module, is_admin, require_admin, restore_upgrade_data, set_fee, store_wasm_module, update_deployment_status, update_refund_status, ExtendedDeploymentRecord, RefundStatus, MAX_REFUND_ATTEMPTS};
 use crate::timer;
+use crate::state::WasmModule;
 
 // Initialization
 #[init]
@@ -177,16 +178,16 @@ fn get_strategy_count() -> u64 {
 // Deployment record management
 #[query]
 fn get_deployment_records() -> Vec<DeploymentRecord> {
-    get_all_deployment_records()
+    get_all_basic_deployment_records()
 }
 
 #[query]
-fn get_my_deployment_records() -> Vec<DeploymentRecord> {
+fn get_my_deployment_records() -> Vec<ExtendedDeploymentRecord> {
     get_deployment_records_by_owner(caller())
 }
 
 #[query]
-fn get_deployment(deployment_id: String) -> Option<DeploymentRecord> {
+fn get_deployment(deployment_id: String) -> Option<ExtendedDeploymentRecord> {
     get_deployment_record(&deployment_id)
 }
 
@@ -240,24 +241,93 @@ async fn request_refund(deployment_id: String) -> Result<(), String> {
         return Err("Only the owner or an admin can request a refund".to_string());
     }
     
-    // Check if eligible for refund
+    // Check refund status first
+    if let Some(refund_status) = &record.refund_status {
+        match refund_status {
+            RefundStatus::Completed { timestamp } => {
+                return Err(format!("This deployment has already been refunded at timestamp: {}", timestamp));
+            }
+            RefundStatus::Failed { reason } => {
+                // Only admins can retry permanently failed refunds
+                if is_admin() {
+                    // Reset the refund status for admin retry
+                    update_refund_status(
+                        &deployment_id,
+                        RefundStatus::NotStarted
+                    )?;
+                } else {
+                    return Err(format!("Refund permanently failed: {}. Contact admin for assistance.", reason));
+                }
+            }
+            RefundStatus::InProgress { attempts } => {
+                if *attempts >= MAX_REFUND_ATTEMPTS && !is_admin() {
+                    return Err("Maximum refund attempts exceeded. Contact admin for assistance.".to_string());
+                }
+                // Continue with refund processing
+            }
+            _ => {
+                // Continue with refund processing
+            }
+        }
+    }
+    
+    // Check if eligible for refund based on deployment status
     match record.status {
         DeploymentStatus::DeploymentFailed => {
-            // Already failed, start the refund process
+            // Check if payment was collected
+            if let Some(error_msg) = &record.error_message {
+                if error_msg.contains("Fee collection failed") ||
+                   error_msg.contains("Payment timeout exceeded") ||
+                   error_msg.contains("Authorization timeout exceeded") {
+                    // No payment collected, mark as not requiring refund
+                    update_refund_status(
+                        &deployment_id,
+                        RefundStatus::Failed { reason: "No payment was collected".to_string() }
+                    )?;
+                    
+                    return Err("No payment was collected, so no refund is necessary".to_string());
+                }
+            }
+            
+            // Mark for refund if no status exists
+            if record.refund_status.is_none() {
+                update_refund_status(
+                    &deployment_id,
+                    RefundStatus::NotStarted
+                )?;
+            }
+            
+            // Start the refund process
             process_refund(&deployment_id).await
         },
         DeploymentStatus::PendingPayment | DeploymentStatus::AuthorizationConfirmed => {
             // Payment not yet collected, just mark as failed and don't refund
-            crate::state::update_deployment_status(
+            update_deployment_status(
                 &deployment_id,
                 DeploymentStatus::DeploymentFailed,
                 None,
                 Some("Deployment cancelled by user".to_string())
-            ).map(|_| ())
+            )?;
+            
+            // Mark as not requiring refund
+            update_refund_status(
+                &deployment_id,
+                RefundStatus::Failed { reason: "Deployment cancelled before payment".to_string() }
+            )?;
+            
+            Ok(())
         },
         DeploymentStatus::Refunding => {
-            // Already refunding, just trigger another refund attempt
-            process_refund(&deployment_id).await
+            // Already refunding, check status and possibly trigger another attempt
+            match &record.refund_status {
+                Some(RefundStatus::InProgress { attempts }) if *attempts >= MAX_REFUND_ATTEMPTS && !is_admin() => {
+                    Err("Maximum refund attempts exceeded. Contact admin for assistance.".to_string())
+                }
+                _ => {
+                    // Trigger another refund attempt
+                    process_refund(&deployment_id).await
+                }
+            }
         },
         DeploymentStatus::Refunded => {
             Err("This deployment has already been refunded".to_string())
@@ -266,13 +336,20 @@ async fn request_refund(deployment_id: String) -> Result<(), String> {
             // If deployment is past payment received, needs admin approval
             if is_admin() {
                 // Mark as failed and process refund
-                crate::state::update_deployment_status(
+                update_deployment_status(
                     &deployment_id,
                     DeploymentStatus::DeploymentFailed,
                     None,
                     Some("Refund authorized by admin".to_string())
                 )?;
                 
+                // Set refund status to not started
+                update_refund_status(
+                    &deployment_id,
+                    RefundStatus::NotStarted
+                )?;
+                
+                // Process the refund
                 process_refund(&deployment_id).await
             } else {
                 Err("This deployment is in progress or completed and cannot be refunded without admin approval".to_string())

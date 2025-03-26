@@ -12,8 +12,8 @@ use strategy_common::types::{
 };
 
 use crate::state::{
-    generate_deployment_id, get_fee, get_wasm_module, store_deployment_record, 
-    update_deployment_status, store_strategy_metadata,
+    generate_deployment_id, get_fee, get_wasm_module, store_basic_deployment_record, 
+    update_deployment_status, store_strategy_metadata, update_refund_status, RefundStatus,
 };
 use crate::payment::{check_allowance, collect_fee, process_refund};
 
@@ -58,7 +58,7 @@ pub async fn create_dca_request(config: DCAConfig) -> Result<DeploymentRequest, 
         last_updated: time(),
     };
     
-    store_deployment_record(record);
+    store_basic_deployment_record(record);
     
     // Return deployment request info
     Ok(DeploymentRequest {
@@ -109,7 +109,7 @@ pub async fn create_value_avg_request(config: ValueAvgConfig) -> Result<Deployme
         last_updated: time(),
     };
     
-    store_deployment_record(record);
+    store_basic_deployment_record(record);
     
     // Return deployment request info
     Ok(DeploymentRequest {
@@ -160,7 +160,7 @@ pub async fn create_fixed_balance_request(config: FixedBalanceConfig) -> Result<
         last_updated: time(),
     };
     
-    store_deployment_record(record);
+    store_basic_deployment_record(record);
     
     // Return deployment request info
     Ok(DeploymentRequest {
@@ -211,7 +211,7 @@ pub async fn create_limit_order_request(config: LimitOrderConfig) -> Result<Depl
         last_updated: time(),
     };
     
-    store_deployment_record(record);
+    store_basic_deployment_record(record);
     
     // Return deployment request info
     Ok(DeploymentRequest {
@@ -262,7 +262,7 @@ pub async fn create_self_hedging_request(config: SelfHedgingConfig) -> Result<De
         last_updated: time(),
     };
     
-    store_deployment_record(record);
+    store_basic_deployment_record(record);
     
     // Return deployment request info
     Ok(DeploymentRequest {
@@ -352,7 +352,13 @@ pub async fn execute_deployment(deployment_id: &str) -> Result<DeploymentResult,
                 Some(format!("Failed to create canister: {}", err))
             )?;
             
-            // Schedule refund
+            // Mark for refund but don't process immediately
+            update_refund_status(
+                deployment_id,
+                RefundStatus::NotStarted
+            )?;
+            
+            // Schedule refund processing asynchronously
             let deployment_id = deployment_id.to_string();
             ic_cdk::spawn(async move {
                 let _ = process_refund(&deployment_id).await;
@@ -374,7 +380,13 @@ pub async fn execute_deployment(deployment_id: &str) -> Result<DeploymentResult,
                 Some(format!("WASM module not found for strategy type: {:?}", record.strategy_type))
             )?;
             
-            // Schedule refund
+            // Mark for refund but don't process immediately
+            update_refund_status(
+                deployment_id,
+                RefundStatus::NotStarted
+            )?;
+            
+            // Schedule refund processing asynchronously
             let deployment_id = deployment_id.to_string();
             ic_cdk::spawn(async move {
                 let _ = process_refund(&deployment_id).await;
@@ -394,7 +406,13 @@ pub async fn execute_deployment(deployment_id: &str) -> Result<DeploymentResult,
             Some(format!("Failed to install code: {}", err))
         )?;
         
-        // Schedule refund
+        // Mark for refund but don't process immediately
+        update_refund_status(
+            deployment_id,
+            RefundStatus::NotStarted
+        )?;
+        
+        // Schedule refund processing asynchronously
         let deployment_id = deployment_id.to_string();
         ic_cdk::spawn(async move {
             let _ = process_refund(&deployment_id).await;
@@ -454,7 +472,13 @@ pub async fn execute_deployment(deployment_id: &str) -> Result<DeploymentResult,
             Some(format!("Failed to initialize strategy: {}", err))
         )?;
         
-        // Schedule refund
+        // Mark for refund but don't process immediately
+        update_refund_status(
+            deployment_id,
+            RefundStatus::NotStarted
+        )?;
+        
+        // Schedule refund processing asynchronously
         let deployment_id = deployment_id.to_string();
         ic_cdk::spawn(async move {
             let _ = process_refund(&deployment_id).await;

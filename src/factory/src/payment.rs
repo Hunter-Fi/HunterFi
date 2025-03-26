@@ -8,7 +8,11 @@ use std::time::Duration;
 use ic_cdk_timers::TimerId;
 use strategy_common::types::{DeploymentStatus};
 
-use crate::state::{ICP_LEDGER_CANISTER_ID, get_deployment_record, update_deployment_status};
+use crate::state::{
+    ICP_LEDGER_CANISTER_ID, MAX_REFUND_ATTEMPTS, RefundStatus,
+    get_deployment_record, update_deployment_status,
+    update_refund_status, update_refund_tx_id, REFUND_LOCKS
+};
 
 thread_local! {
     // Track current refunds in progress
@@ -161,25 +165,103 @@ pub async fn collect_fee(deployment_id: &str) -> Result<(), String> {
     }
 }
 
-/// Process refund to the user
+/// Process refund to the user with improved handling to prevent duplicate refunds
 pub async fn process_refund(deployment_id: &str) -> Result<(), String> {
+    // Use locking to prevent concurrent processing of the same refund
+    REFUND_LOCKS.with(|locks| {
+        if locks.borrow().contains(deployment_id) {
+            return Err(format!("Refund already being processed for: {}", deployment_id));
+        }
+        locks.borrow_mut().insert(deployment_id.to_string());
+        Ok(())
+    })?;
+    
+    // Ensure lock is released when function completes
+    let result = process_refund_internal(deployment_id).await;
+    
+    REFUND_LOCKS.with(|locks| {
+        locks.borrow_mut().remove(deployment_id);
+    });
+    
+    result
+}
+
+/// Internal implementation of refund processing
+async fn process_refund_internal(deployment_id: &str) -> Result<(), String> {
     // Get deployment record
     let record = get_deployment_record(deployment_id)
         .ok_or_else(|| format!("Deployment record not found for ID: {}", deployment_id))?;
     
-    // Verify status
+    // Verify status - only failed deployments can be refunded
     if record.status != DeploymentStatus::DeploymentFailed && record.status != DeploymentStatus::Refunding {
         return Err(format!("Invalid status for refund: {:?}", record.status));
     }
     
-    // Update status to refunding
-    update_deployment_status(
-        deployment_id, 
-        DeploymentStatus::Refunding, 
-        None, 
-        None
-    )?;
+    // Check current refund status
+    match &record.refund_status {
+        Some(RefundStatus::Completed { timestamp }) => {
+            return Err(format!("Refund already completed at timestamp: {}", timestamp));
+        }
+        Some(RefundStatus::Failed { reason }) => {
+            return Err(format!("Refund previously failed permanently: {}", reason));
+        }
+        Some(RefundStatus::InProgress { attempts }) => {
+            // Check if we've exceeded max attempts
+            if *attempts >= MAX_REFUND_ATTEMPTS {
+                // Mark as permanently failed
+                update_refund_status(
+                    deployment_id,
+                    RefundStatus::Failed { 
+                        reason: format!("Exceeded maximum of {} refund attempts", MAX_REFUND_ATTEMPTS) 
+                    }
+                )?;
+                
+                return Err(format!("Maximum refund attempts ({}) exceeded", MAX_REFUND_ATTEMPTS));
+            }
+            
+            // Update attempts count
+            update_refund_status(
+                deployment_id,
+                RefundStatus::InProgress { attempts: attempts + 1 }
+            )?;
+        }
+        _ => {
+            // First attempt
+            update_refund_status(
+                deployment_id,
+                RefundStatus::InProgress { attempts: 1 }
+            )?;
+        }
+    }
     
+    // Update status to refunding if not already
+    if record.status != DeploymentStatus::Refunding {
+        update_deployment_status(
+            deployment_id, 
+            DeploymentStatus::Refunding, 
+            None, 
+            None
+        )?;
+    }
+    
+    // Skip actual refund transfer if we're in testing or the fee is zero
+    if record.fee_amount == 0 {
+        update_refund_status(
+            deployment_id,
+            RefundStatus::Completed { timestamp: time() }
+        )?;
+        
+        update_deployment_status(
+            deployment_id, 
+            DeploymentStatus::Refunded, 
+            None, 
+            None
+        )?;
+        
+        return Ok(());
+    }
+    
+    // Perform the actual refund transfer
     let ledger_id = Principal::from_text(ICP_LEDGER_CANISTER_ID)
         .map_err(|_| "Invalid ICP ledger ID".to_string())?;
     
@@ -197,7 +279,7 @@ pub async fn process_refund(deployment_id: &str) -> Result<(), String> {
     let call_result: CallResult<(u128,)> = call(ledger_id, "icrc1_transfer", (args,)).await;
     
     match call_result {
-        Ok(_) => {
+        Ok((tx_id,)) => {
             // Update status to refunded
             update_deployment_status(
                 deployment_id, 
@@ -205,24 +287,69 @@ pub async fn process_refund(deployment_id: &str) -> Result<(), String> {
                 None, 
                 None
             )?;
+            
+            // Update refund status and transaction ID
+            update_refund_status(
+                deployment_id,
+                RefundStatus::Completed { timestamp: time() }
+            )?;
+            
+            update_refund_tx_id(deployment_id, Some(tx_id))?;
+            
+            // Clear any scheduled retries
+            cancel_refund_retry(deployment_id)?;
+            
             Ok(())
         }
         Err((code, message)) => {
             let error = format!("Refund failed: {}: {}", code as u8, message);
             
-            // Keep status as refunding and schedule retry
-            schedule_refund_retry(deployment_id.to_string());
+            // Get current attempts
+            let attempts = match record.refund_status {
+                Some(RefundStatus::InProgress { attempts }) => attempts,
+                _ => 1,
+            };
             
-            Err(error)
+            if attempts < MAX_REFUND_ATTEMPTS {
+                // Schedule retry with exponential backoff
+                schedule_refund_retry(deployment_id.to_string(), attempts);
+                Err(error)
+            } else {
+                // Mark as permanently failed
+                update_refund_status(
+                    deployment_id,
+                    RefundStatus::Failed { reason: error.clone() }
+                )?;
+                
+                Err(error)
+            }
         }
     }
 }
 
-/// Schedule a refund retry after a delay
-fn schedule_refund_retry(deployment_id: String) {
+/// Schedule a refund retry with exponential backoff
+fn schedule_refund_retry(deployment_id: String, attempts: u8) {
+    // Cancel any existing retry timer
+    REFUND_TIMERS.with(|timers| {
+        if let Some(timer_id) = timers.borrow().get(&deployment_id) {
+            ic_cdk_timers::clear_timer(*timer_id);
+        }
+    });
+    
+    // Calculate delay with exponential backoff
+    let base_delay_secs = 60; // 1 minute base delay
+    let max_delay_secs = 3600; // Max 1 hour
+    
+    // Calculate delay: min(base_delay * 2^attempts, max_delay)
+    let backoff_factor = 1u64 << (attempts as u32); // 2^attempts
+    let delay_secs = std::cmp::min(
+        base_delay_secs * backoff_factor,
+        max_delay_secs
+    );
+    
     let deployment_id_clone = deployment_id.clone();
     
-    let timer_id = ic_cdk_timers::set_timer(Duration::from_secs(300), move || {
+    let timer_id = ic_cdk_timers::set_timer(Duration::from_secs(delay_secs), move || {
         let deployment_id = deployment_id_clone.clone();
         ic_cdk::spawn(async move {
             match process_refund(&deployment_id).await {
@@ -232,8 +359,9 @@ fn schedule_refund_retry(deployment_id: String) {
                         timers.borrow_mut().remove(&deployment_id);
                     });
                 }
-                Err(_) => {
-                    // Will be retried by the timer
+                Err(e) => {
+                    ic_cdk::println!("Scheduled refund retry failed for {}: {}", deployment_id, e);
+                    // Will be retried if attempts < max
                 }
             }
         });
@@ -241,8 +369,11 @@ fn schedule_refund_retry(deployment_id: String) {
     
     // Store timer ID
     REFUND_TIMERS.with(|timers| {
-        timers.borrow_mut().insert(deployment_id, timer_id);
+        timers.borrow_mut().insert(deployment_id.clone(), timer_id);
     });
+    
+    ic_cdk::println!("Scheduled refund retry for {} in {} seconds (attempt {})", 
+                     deployment_id, delay_secs, attempts + 1);
 }
 
 /// Cancel a refund retry
@@ -253,7 +384,8 @@ pub fn cancel_refund_retry(deployment_id: &str) -> Result<(), String> {
             ic_cdk_timers::clear_timer(timer_id);
             Ok(())
         } else {
-            Err(format!("No refund timer found for deployment ID: {}", deployment_id))
+            // Not an error if no timer exists
+            Ok(())
         }
     })
 }
@@ -266,15 +398,27 @@ pub fn schedule_refunds_for_failed_deployments() {
     let failed_deployments = get_deployment_records_by_status(DeploymentStatus::DeploymentFailed);
     
     for record in failed_deployments {
-        // Only process records that have received payment
-        if let Some(last_status) = record.error_message.as_deref() {
-            if !last_status.contains("Fee collection failed") {
-                let deployment_id = record.deployment_id.clone();
-                ic_cdk::spawn(async move {
-                    let _ = process_refund(&deployment_id).await;
-                });
+        // Skip refunding if this failure occurred before payment
+        if let Some(error_msg) = &record.error_message {
+            if error_msg.contains("Fee collection failed") ||
+               error_msg.contains("Payment timeout exceeded") ||
+               error_msg.contains("Authorization timeout exceeded") {
+                continue;
             }
         }
+        
+        // Skip if already refunded or permanently failed
+        match &record.refund_status {
+            Some(RefundStatus::Completed { .. }) => continue,
+            Some(RefundStatus::Failed { .. }) => continue,
+            _ => {}
+        }
+        
+        // Process one at a time to avoid overwhelming the system
+        let deployment_id = record.deployment_id.clone();
+        ic_cdk::spawn(async move {
+            let _ = process_refund(&deployment_id).await;
+        });
     }
 }
 
