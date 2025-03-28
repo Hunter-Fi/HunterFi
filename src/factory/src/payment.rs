@@ -2,56 +2,33 @@ use candid::{CandidType, Principal};
 use ic_cdk::api::call::{call, CallResult};
 use ic_cdk::api::time;
 use serde::Deserialize;
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::time::Duration;
-use ic_cdk_timers::TimerId;
-use strategy_common::types::{DeploymentStatus};
+use strategy_common::types::DeploymentStatus;
 
 use crate::state::{
-    ICP_LEDGER_CANISTER_ID, MAX_REFUND_ATTEMPTS, RefundStatus,
+    ICP_LEDGER_CANISTER_ID,
     get_deployment_record, update_deployment_status,
-    update_refund_status, update_refund_tx_id, REFUND_LOCKS
+    update_user_balance, TransactionType, record_transaction,
+    check_user_balance, get_deployment_records_by_status,
+    get_user_account,
 };
 
-thread_local! {
-    // Track current refunds in progress
-    static REFUND_TIMERS: RefCell<HashMap<String, TimerId>> = RefCell::new(HashMap::new());
-}
+// Transaction constants
+const MAX_DEPOSIT_AMOUNT: u64 = 10_000_000_000;  // 100 ICP
+const MIN_DEPOSIT_AMOUNT: u64 = 1_000_000;       // 0.01 ICP
+const ICP_TRANSFER_FEE: u128 = 10_000;           // 0.0001 ICP
+const MAX_WITHDRAWAL_RETRIES: u8 = 3;            // Maximum withdrawal retry attempts
+const MIN_CYCLES_BALANCE: u64 = 1_000_000_000;   // Minimum cycles balance (1T)
 
-// ICRC2 Allowance args and response
-#[derive(CandidType, Debug)]
-struct AllowanceArgs {
-    account: Account,
-    spender: Account,
-}
-
-#[derive(CandidType, Deserialize, Debug)]
-struct Allowance {
-    allowance: u128,
-    expires_at: Option<u64>,
-}
-
-// ICRC1/2 Account type
+// ICRC1 Account type
 #[derive(CandidType, Deserialize, Debug, Clone)]
 struct Account {
     owner: Principal,
     subaccount: Option<Vec<u8>>,
 }
 
-// ICRC2 TransferFrom args
-#[derive(CandidType, Debug)]
-struct TransferFromArgs {
-    from: Account,
-    to: Account,
-    amount: u128,
-    fee: Option<u128>,
-    memo: Option<Vec<u8>>,
-    created_at_time: Option<u64>,
-}
-
-// ICRC1 Transfer args
-#[derive(CandidType, Debug)]
+// ICRC1 Transfer arguments
+#[derive(CandidType, Debug, Clone)]
 struct TransferArgs {
     to: Account,
     amount: u128,
@@ -60,65 +37,26 @@ struct TransferArgs {
     created_at_time: Option<u64>,
 }
 
-/// Check allowance for the fee
-pub async fn check_allowance(owner: Principal, fee: u64) -> Result<bool, String> {
-    let ledger_id = Principal::from_text(ICP_LEDGER_CANISTER_ID)
-        .map_err(|_| "Invalid ICP ledger ID".to_string())?;
-    
-    let factory_id = ic_cdk::id();
-    
-    let args = AllowanceArgs {
-        account: Account {
-            owner,
-            subaccount: None,
-        },
-        spender: Account {
-            owner: factory_id,
-            subaccount: None,
-        },
-    };
-    
-    let call_result: CallResult<(Allowance,)> = call(ledger_id, "icrc2_allowance", (args,)).await;
-    
-    match call_result {
-        Ok((allowance,)) => {
-            // Ensure the allowance is sufficient
-            if allowance.allowance >= fee as u128 {
-                Ok(true)
-            } else {
-                Ok(false)
-            }
-        }
-        Err((code, message)) => {
-            Err(format!("Failed to check allowance: {}: {}", code as u8, message))
-        }
-    }
-}
-
-/// Collect the deployment fee using ICRC2 transfer_from
-pub async fn collect_fee(deployment_id: &str) -> Result<(), String> {
-    // Get deployment record
-    let record = get_deployment_record(deployment_id)
-        .ok_or_else(|| format!("Deployment record not found for ID: {}", deployment_id))?;
-    
-    // Verify status is correct
-    if record.status != DeploymentStatus::AuthorizationConfirmed {
+/// Process user deposit
+pub async fn process_deposit(user: Principal, amount: u64) -> Result<u64, String> {
+    // Security check: Amount must be within reasonable range
+    if amount < MIN_DEPOSIT_AMOUNT {
         return Err(format!(
-            "Invalid deployment status: {:?}, expected: {:?}", 
-            record.status, 
-            DeploymentStatus::AuthorizationConfirmed
+            "Deposit amount cannot be less than {} ICP", 
+            MIN_DEPOSIT_AMOUNT as f64 / 100_000_000.0
         ));
     }
-
-    if record.fee_amount == 0 {
-        // Skip fee collection if fee is zero
-        update_deployment_status(
-            deployment_id,
-            DeploymentStatus::PaymentReceived,
-            None,
-            None
-        )?;
-        return Ok(());
+    
+    if amount > MAX_DEPOSIT_AMOUNT {
+        return Err(format!(
+            "Deposit amount cannot exceed {} ICP", 
+            MAX_DEPOSIT_AMOUNT as f64 / 100_000_000.0
+        ));
+    }
+    
+    // Verify caller is not anonymous
+    if user == Principal::anonymous() {
+        return Err("Anonymous identity cannot make deposits".to_string());
     }
     
     let ledger_id = Principal::from_text(ICP_LEDGER_CANISTER_ID)
@@ -126,329 +64,231 @@ pub async fn collect_fee(deployment_id: &str) -> Result<(), String> {
     
     let factory_id = ic_cdk::id();
     
-    let args = TransferFromArgs {
-        from: Account {
-            owner: record.owner,
-            subaccount: None,
-        },
+    // Build transfer parameters
+    let transfer_args = TransferArgs {
         to: Account {
             owner: factory_id,
             subaccount: None,
         },
-        amount: record.fee_amount as u128,
-        fee: Some(10_000), // 0.0001 ICP
-        memo: Some(format!("Deployment fee for {}", deployment_id).as_bytes().to_vec()),
+        amount: amount as u128,
+        fee: Some(ICP_TRANSFER_FEE),
+        memo: Some(format!("HunterFi deposit from {}", user).as_bytes().to_vec()),
         created_at_time: Some(time()),
     };
     
-    let call_result: CallResult<(u128,)> = call(ledger_id, "icrc2_transfer_from", (args,)).await;
+    // Call ICRC1 ledger to transfer
+    let transfer_result: CallResult<(u128,)> = call(ledger_id, "icrc1_transfer", (transfer_args,)).await;
     
-    match call_result {
+    match transfer_result {
         Ok(_) => {
-            // Update status to payment received
-            update_deployment_status(
-                deployment_id, 
-                DeploymentStatus::PaymentReceived, 
-                None, 
-                None
-            )?;
-            Ok(())
-        }
+            // Update user balance
+            let new_balance = update_user_balance(user, amount, true)?;
+            
+            // Record transaction
+            let description = format!("Deposit of {:.8} ICP", amount as f64 / 100_000_000.0);
+            record_transaction(
+                user, 
+                amount, 
+                TransactionType::Deposit,
+                description
+            );
+            
+            ic_cdk::println!("User {} successfully deposited {} e8s", user.to_text(), amount);
+            Ok(new_balance)
+        },
         Err((code, message)) => {
-            // Update status to failed
-            update_deployment_status(
-                deployment_id, 
-                DeploymentStatus::DeploymentFailed, 
-                None, 
-                Some(format!("Fee collection failed: {}: {}", code as u8, message))
-            )?;
-            
-            Err(format!("Failed to collect fee: {}: {}", code as u8, message))
+            ic_cdk::println!("User {} deposit failed: code={:?}, message={}", user.to_text(), code, message);
+            Err(format!("Deposit failed: {}", message))
         }
     }
 }
 
-/// Process refund to the user with improved handling to prevent duplicate refunds
-pub async fn process_refund(deployment_id: &str) -> Result<(), String> {
-    // Use locking to prevent concurrent processing of the same refund
-    REFUND_LOCKS.with(|locks| {
-        if locks.borrow().contains(deployment_id) {
-            return Err(format!("Refund already being processed for: {}", deployment_id));
-        }
-        locks.borrow_mut().insert(deployment_id.to_string());
-        Ok(())
-    })?;
+/// Process payment from user's balance for deployment
+pub fn process_balance_payment(user: Principal, amount: u64, purpose: &str) -> Result<(), String> {
+    // Check if amount is valid
+    if amount == 0 {
+        return Err("Payment amount must be greater than 0".to_string());
+    }
     
-    // Ensure lock is released when function completes
-    let result = process_refund_internal(deployment_id).await;
+    // Check if user has sufficient balance
+    if !check_user_balance(user, amount)? {
+        return Err(format!(
+            "Insufficient balance: {:.8} ICP required, but your balance is too low", 
+            amount as f64 / 100_000_000.0
+        ));
+    }
     
-    REFUND_LOCKS.with(|locks| {
-        locks.borrow_mut().remove(deployment_id);
-    });
+    // Deduct from user balance
+    update_user_balance(user, amount, false)?;
     
-    result
+    // Record transaction
+    record_transaction(
+        user,
+        amount,
+        TransactionType::DeploymentFee,
+        purpose.to_string()
+    );
+    
+    ic_cdk::println!("User {} paid {} e8s for: {}", user.to_text(), amount, purpose);
+    Ok(())
 }
 
-/// Internal implementation of refund processing
-async fn process_refund_internal(deployment_id: &str) -> Result<(), String> {
-    // Get deployment record
-    let record = get_deployment_record(deployment_id)
-        .ok_or_else(|| format!("Deployment record not found for ID: {}", deployment_id))?;
-    
-    // Verify status - only failed deployments can be refunded
-    if record.status != DeploymentStatus::DeploymentFailed && record.status != DeploymentStatus::Refunding {
-        return Err(format!("Invalid status for refund: {:?}", record.status));
+/// Process refund back to user balance
+pub fn process_balance_refund(user: Principal, amount: u64, deployment_id: &str) -> Result<(), String> {
+    // Verify refund amount is valid
+    if amount == 0 {
+        return Err("Refund amount must be greater than 0".to_string());
     }
     
-    // Check current refund status
-    match &record.refund_status {
-        Some(RefundStatus::Completed { timestamp }) => {
-            return Err(format!("Refund already completed at timestamp: {}", timestamp));
-        }
-        Some(RefundStatus::Failed { reason }) => {
-            return Err(format!("Refund previously failed permanently: {}", reason));
-        }
-        Some(RefundStatus::InProgress { attempts }) => {
-            // Check if we've exceeded max attempts
-            if *attempts >= MAX_REFUND_ATTEMPTS {
-                // Mark as permanently failed
-                update_refund_status(
-                    deployment_id,
-                    RefundStatus::Failed { 
-                        reason: format!("Exceeded maximum of {} refund attempts", MAX_REFUND_ATTEMPTS) 
-                    }
-                )?;
-                
-                return Err(format!("Maximum refund attempts ({}) exceeded", MAX_REFUND_ATTEMPTS));
-            }
-            
-            // Update attempts count
-            update_refund_status(
-                deployment_id,
-                RefundStatus::InProgress { attempts: attempts + 1 }
-            )?;
-        }
-        _ => {
-            // First attempt
-            update_refund_status(
-                deployment_id,
-                RefundStatus::InProgress { attempts: 1 }
-            )?;
-        }
+    // Add to user balance
+    update_user_balance(user, amount, true)?;
+    
+    // Record transaction
+    let description = format!("Refund for failed deployment (ID: {})", deployment_id);
+    record_transaction(
+        user,
+        amount,
+        TransactionType::Refund,
+        description
+    );
+    
+    ic_cdk::println!("Successfully processed refund of {} e8s for user {}, deployment ID: {}", amount, user.to_text(), deployment_id);
+    Ok(())
+}
+
+/// Allow user to withdraw their funds to external wallet
+pub async fn user_withdraw_funds(user: Principal, amount: u64) -> Result<u64, String> {
+    // Security checks
+    if amount == 0 {
+        return Err("Withdrawal amount must be greater than 0".to_string());
     }
     
-    // Update status to refunding if not already
-    if record.status != DeploymentStatus::Refunding {
-        update_deployment_status(
-            deployment_id, 
-            DeploymentStatus::Refunding, 
-            None, 
-            None
-        )?;
+    if amount > MAX_DEPOSIT_AMOUNT {
+        return Err(format!(
+            "Withdrawal amount cannot exceed {} ICP", 
+            MAX_DEPOSIT_AMOUNT as f64 / 100_000_000.0
+        ));
     }
     
-    // Skip actual refund transfer if we're in testing or the fee is zero
-    if record.fee_amount == 0 {
-        update_refund_status(
-            deployment_id,
-            RefundStatus::Completed { timestamp: time() }
-        )?;
-        
-        update_deployment_status(
-            deployment_id, 
-            DeploymentStatus::Refunded, 
-            None, 
-            None
-        )?;
-        
-        return Ok(());
+    if user == Principal::anonymous() {
+        return Err("Anonymous identity cannot withdraw funds".to_string());
     }
     
-    // Perform the actual refund transfer
+    // Check if user has sufficient balance
+    let user_account = get_user_account(user).ok_or_else(|| "User account not found".to_string())?;
+    
+    if user_account.balance < amount {
+        return Err(format!(
+            "Insufficient balance: you have {:.8} ICP but requested {:.8} ICP",
+            user_account.balance as f64 / 100_000_000.0,
+            amount as f64 / 100_000_000.0
+        ));
+    }
+    
+    // Verify canister has sufficient cycles
+    let canister_balance = ic_cdk::api::canister_balance();
+    
+    if canister_balance < MIN_CYCLES_BALANCE {
+        return Err(format!(
+            "System cycles balance too low for safe operation. Please try again later or contact support.",
+        ));
+    }
+    
     let ledger_id = Principal::from_text(ICP_LEDGER_CANISTER_ID)
         .map_err(|_| "Invalid ICP ledger ID".to_string())?;
     
     let args = TransferArgs {
         to: Account {
-            owner: record.owner,
+            owner: user,
             subaccount: None,
         },
-        amount: record.fee_amount as u128,
-        fee: Some(10_000), // 0.0001 ICP
-        memo: Some(format!("Refund for failed deployment {}", deployment_id).as_bytes().to_vec()),
+        amount: amount as u128,
+        fee: Some(ICP_TRANSFER_FEE),
+        memo: Some(b"Withdrawal from HunterFi".to_vec()),
         created_at_time: Some(time()),
     };
     
-    let call_result: CallResult<(u128,)> = call(ledger_id, "icrc1_transfer", (args,)).await;
+    // Use retry logic to enhance reliability
+    let mut retries = 0;
+    let mut last_error = "Unknown error".to_string();
     
-    match call_result {
-        Ok((tx_id,)) => {
-            // Update status to refunded
-            update_deployment_status(
-                deployment_id, 
-                DeploymentStatus::Refunded, 
-                None, 
-                None
-            )?;
-            
-            // Update refund status and transaction ID
-            update_refund_status(
-                deployment_id,
-                RefundStatus::Completed { timestamp: time() }
-            )?;
-            
-            update_refund_tx_id(deployment_id, Some(tx_id))?;
-            
-            // Clear any scheduled retries
-            cancel_refund_retry(deployment_id)?;
-            
-            Ok(())
-        }
-        Err((code, message)) => {
-            let error = format!("Refund failed: {}: {}", code as u8, message);
-            
-            // Get current attempts
-            let attempts = match record.refund_status {
-                Some(RefundStatus::InProgress { attempts }) => attempts,
-                _ => 1,
-            };
-            
-            // Analyze the error for permanent vs. temporary failures
-            let is_permanent_error = match code {
-                // Check for permanent errors based on reject codes
-                ic_cdk::api::call::RejectionCode::CanisterError => 
-                    message.contains("insufficient funds") || message.contains("invalid recipient"),
-                ic_cdk::api::call::RejectionCode::DestinationInvalid => true,
-                _ => false
-            };
-            
-            if is_permanent_error {
-                // Don't retry for permanent errors
-                update_refund_status(
-                    deployment_id,
-                    RefundStatus::Failed { reason: format!("Permanent error: {}", error) }
-                )?;
+    while retries < MAX_WITHDRAWAL_RETRIES {
+        let call_result: CallResult<(u128,)> = call(ledger_id, "icrc1_transfer", (args.clone(),)).await;
+        
+        match call_result {
+            Ok(_) => {
+                // Update user balance
+                let new_balance = update_user_balance(user, amount, false)?;
                 
-                Err(format!("Permanent refund error: {}", error))
-            } else if attempts < MAX_REFUND_ATTEMPTS {
-                // Only schedule retry for temporary errors
-                // Log detailed error information
-                ic_cdk::println!("Temporary refund error (attempt {}/{}): Code={:?}, Message={}", 
-                               attempts, MAX_REFUND_ATTEMPTS, code, message);
-                               
-                // Schedule retry with exponential backoff
-                schedule_refund_retry(deployment_id.to_string(), attempts);
-                Err(error)
-            } else {
-                // Mark as permanently failed after max attempts
-                update_refund_status(
-                    deployment_id,
-                    RefundStatus::Failed { reason: error.clone() }
-                )?;
+                // Record transaction
+                let description = format!("Withdrawal of {:.8} ICP to user wallet", amount as f64 / 100_000_000.0);
+                record_transaction(
+                    user,
+                    amount,
+                    TransactionType::Refund, // Using Refund type as it's a transfer out
+                    description
+                );
                 
-                Err(error)
+                ic_cdk::println!("User {} successfully withdrawn {} e8s. New balance: {}", user.to_text(), amount, new_balance);
+                return Ok(new_balance);
+            },
+            Err((code, message)) => {
+                last_error = format!("code={:?}, message={}", code, message);
+                retries += 1;
+                
+                // Check if temporary error
+                let is_temporary_error = match code {
+                    ic_cdk::api::call::RejectionCode::SysFatal => false,
+                    ic_cdk::api::call::RejectionCode::SysTransient => true,
+                    _ => false
+                };
+                
+                if is_temporary_error && retries < MAX_WITHDRAWAL_RETRIES {
+                    // IC environment doesn't have sleep, if this is the last attempt, exit directly
+                    if retries == MAX_WITHDRAWAL_RETRIES - 1 {
+                        break;
+                    }
+                    
+                    ic_cdk::println!("User withdrawal temporarily failed, retrying immediately ({}/{})", retries, MAX_WITHDRAWAL_RETRIES);
+                    continue;
+                }
+                
+                break;
             }
         }
     }
+    
+    Err(format!("Withdrawal failed after {} attempts: {}", retries, last_error))
 }
 
-/// Schedule a refund retry with exponential backoff
-fn schedule_refund_retry(deployment_id: String, attempts: u8) {
-    // Cancel any existing retry timer
-    REFUND_TIMERS.with(|timers| {
-        if let Some(timer_id) = timers.borrow().get(&deployment_id) {
-            ic_cdk_timers::clear_timer(*timer_id);
-        }
-    });
-    
-    // Calculate delay with exponential backoff
-    let base_delay_secs = 60; // 1 minute base delay
-    let max_delay_secs = 3600; // Max 1 hour
-    
-    // Calculate delay: min(base_delay * 2^attempts, max_delay)
-    let backoff_factor = 1u64 << (attempts as u32); // 2^attempts
-    let delay_secs = std::cmp::min(
-        base_delay_secs * backoff_factor,
-        max_delay_secs
-    );
-    
-    let deployment_id_clone = deployment_id.clone();
-    
-    let timer_id = ic_cdk_timers::set_timer(Duration::from_secs(delay_secs), move || {
-        let deployment_id = deployment_id_clone.clone();
-        ic_cdk::spawn(async move {
-            match process_refund(&deployment_id).await {
-                Ok(_) => {
-                    // Refund succeeded, remove timer
-                    REFUND_TIMERS.with(|timers| {
-                        timers.borrow_mut().remove(&deployment_id);
-                    });
-                }
-                Err(e) => {
-                    ic_cdk::println!("Scheduled refund retry failed for {}: {}", deployment_id, e);
-                    // Will be retried if attempts < max
-                }
-            }
-        });
-    });
-    
-    // Store timer ID
-    REFUND_TIMERS.with(|timers| {
-        timers.borrow_mut().insert(deployment_id.clone(), timer_id);
-    });
-    
-    ic_cdk::println!("Scheduled refund retry for {} in {} seconds (attempt {})", 
-                     deployment_id, delay_secs, attempts + 1);
-}
-
-/// Cancel a refund retry
-pub fn cancel_refund_retry(deployment_id: &str) -> Result<(), String> {
-    REFUND_TIMERS.with(|timers| {
-        let mut timers = timers.borrow_mut();
-        if let Some(timer_id) = timers.remove(deployment_id) {
-            ic_cdk_timers::clear_timer(timer_id);
-            Ok(())
-        } else {
-            // Not an error if no timer exists
-            Ok(())
-        }
-    })
-}
-
-/// Schedule automatic refunds for all failed deployments
-pub fn schedule_refunds_for_failed_deployments() {
-    use crate::state::get_deployment_records_by_status;
-    
-    // Get all failed deployments that haven't started refunding
-    let failed_deployments = get_deployment_records_by_status(DeploymentStatus::DeploymentFailed);
-    
-    for record in failed_deployments {
-        // Skip refunding if this failure occurred before payment
-        if let Some(error_msg) = &record.error_message {
-            if error_msg.contains("Fee collection failed") ||
-               error_msg.contains("Payment timeout exceeded") ||
-               error_msg.contains("Authorization timeout exceeded") {
-                continue;
-            }
-        }
-        
-        // Skip if already refunded or permanently failed
-        match &record.refund_status {
-            Some(RefundStatus::Completed { .. }) => continue,
-            Some(RefundStatus::Failed { .. }) => continue,
-            _ => {}
-        }
-        
-        // Process one at a time to avoid overwhelming the system
-        let deployment_id = record.deployment_id.clone();
-        ic_cdk::spawn(async move {
-            let _ = process_refund(&deployment_id).await;
-        });
-    }
-}
-
-/// Withdraw funds from the canister to an account
+/// Withdraw funds from system to external account (admin only)
 pub async fn withdraw_funds(recipient: Principal, amount: u64) -> Result<(), String> {
+    // Security checks
+    if amount == 0 {
+        return Err("Withdrawal amount must be greater than 0".to_string());
+    }
+    
+    if amount > MAX_DEPOSIT_AMOUNT {
+        return Err(format!(
+            "Withdrawal amount cannot exceed {} ICP", 
+            MAX_DEPOSIT_AMOUNT as f64 / 100_000_000.0
+        ));
+    }
+    
+    if recipient == Principal::anonymous() {
+        return Err("Cannot withdraw to anonymous identity".to_string());
+    }
+    
+    // Verify canister has sufficient cycles
+    let canister_balance = ic_cdk::api::canister_balance();
+    
+    if canister_balance < MIN_CYCLES_BALANCE {
+        return Err(format!(
+            "Canister cycles balance too low for safe operation. Current balance: {} cycles",
+            canister_balance
+        ));
+    }
+    
     let ledger_id = Principal::from_text(ICP_LEDGER_CANISTER_ID)
         .map_err(|_| "Invalid ICP ledger ID".to_string())?;
     
@@ -458,17 +298,98 @@ pub async fn withdraw_funds(recipient: Principal, amount: u64) -> Result<(), Str
             subaccount: None,
         },
         amount: amount as u128,
-        fee: Some(10_000), // 0.0001 ICP
-        memo: Some(b"Withdrawal from factory canister".to_vec()),
+        fee: Some(ICP_TRANSFER_FEE),
+        memo: Some(b"Withdrawal from HunterFi Factory".to_vec()),
         created_at_time: Some(time()),
     };
     
-    let call_result: CallResult<(u128,)> = call(ledger_id, "icrc1_transfer", (args,)).await;
+    // Use retry logic to enhance reliability
+    let mut retries = 0;
+    let mut last_error = "Unknown error".to_string();
     
-    match call_result {
-        Ok(_) => Ok(()),
-        Err((code, message)) => {
-            Err(format!("Withdrawal failed: {}: {}", code as u8, message))
+    while retries < MAX_WITHDRAWAL_RETRIES {
+        let call_result: CallResult<(u128,)> = call(ledger_id, "icrc1_transfer", (args.clone(),)).await;
+        
+        match call_result {
+            Ok(_) => {
+                ic_cdk::println!("Successfully withdrawn {} e8s to account {}", amount, recipient.to_text());
+                return Ok(());
+            },
+            Err((code, message)) => {
+                last_error = format!("code={:?}, message={}", code, message);
+                retries += 1;
+                
+                // Check if temporary error
+                let is_temporary_error = match code {
+                    ic_cdk::api::call::RejectionCode::SysFatal => false,
+                    ic_cdk::api::call::RejectionCode::SysTransient => true,
+                    _ => false
+                };
+                
+                if is_temporary_error && retries < MAX_WITHDRAWAL_RETRIES {
+                    // IC environment doesn't have sleep, if this is the last attempt, exit directly
+                    if retries == MAX_WITHDRAWAL_RETRIES - 1 {
+                        break;
+                    }
+                    
+                    // Simple retry without waiting - IC environment has no reliable waiting mechanism
+                    ic_cdk::println!("Withdrawal temporarily failed, retrying immediately ({}/{})", retries, MAX_WITHDRAWAL_RETRIES);
+                    continue;
+                }
+                
+                break;
+            }
         }
+    }
+    
+    Err(format!("Withdrawal failed after {} attempts: {}", retries, last_error))
+}
+
+/// Process all records in DeploymentFailed status for refunds
+pub async fn process_failed_deployments() -> Result<usize, String> {
+    // Get all failed deployments
+    let failed_deployments = get_deployment_records_by_status(DeploymentStatus::DeploymentFailed);
+    let mut processed_count = 0;
+    let mut errors = Vec::new();
+    
+    for record in failed_deployments {
+        // Skip already processed refunds
+        if record.status == DeploymentStatus::Refunded {
+            continue;
+        }
+        
+        // Process refund (add back to user balance)
+        match process_balance_refund(record.owner, record.fee_amount, &record.deployment_id) {
+            Ok(_) => {
+                // Update deployment status
+                match update_deployment_status(
+                    &record.deployment_id,
+                    DeploymentStatus::Refunded,
+                    None,
+                    None
+                ) {
+                    Ok(_) => {
+                        processed_count += 1;
+                        ic_cdk::println!("Successfully processed refund for deployment ID {}", record.deployment_id);
+                    },
+                    Err(e) => {
+                        ic_cdk::println!("Failed to update status for deployment {}: {}", record.deployment_id, e);
+                        errors.push(format!("Status update error (ID: {}): {}", record.deployment_id, e));
+                    }
+                }
+            },
+            Err(e) => {
+                ic_cdk::println!("Failed to process refund for deployment {}: {}", record.deployment_id, e);
+                errors.push(format!("Refund error (ID: {}): {}", record.deployment_id, e));
+            }
+        }
+    }
+    
+    // Return processing results and error details
+    if !errors.is_empty() && processed_count == 0 {
+        // Only return error if no records were processed
+        Err(format!("Could not process any refunds. Errors: {}", errors.join(", ")))
+    } else {
+        Ok(processed_count)
     }
 } 

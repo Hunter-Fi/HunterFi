@@ -12,6 +12,7 @@ use strategy_common::types::{
 };
 use serde::{Deserialize, Serialize};
 use candid::CandidType;
+use hex;
 
 // ICP Ledger canister ID
 pub const ICP_LEDGER_CANISTER_ID: &str = "ryjl3-tyaaa-aaaaa-aaaba-cai";
@@ -19,45 +20,40 @@ pub const ICP_LEDGER_CANISTER_ID: &str = "ryjl3-tyaaa-aaaaa-aaaba-cai";
 // Default deployment fee (1 ICP)
 pub const DEFAULT_DEPLOYMENT_FEE: u64 = 100_000_000; // 1 ICP in e8s
 
-// Maximum number of refund attempts
-pub const MAX_REFUND_ATTEMPTS: u8 = 5;
-
 // Constants for record archiving
-// Record retention period (in nanoseconds)
 pub const COMPLETED_RECORD_RETENTION_DAYS: u64 = 90; // 90 days
 pub const RETENTION_PERIOD_NS: u64 = COMPLETED_RECORD_RETENTION_DAYS * 24 * 60 * 60 * 1_000_000_000;
-
-// Maximum number of completed records to maintain
 pub const MAX_COMPLETED_RECORDS: usize = 10000;
-
-// Archiving threshold percentage (start archiving when memory usage > 80%)
 pub const ARCHIVING_THRESHOLD_PERCENT: u8 = 80;
 
-// Refund status for tracking refund process
-#[derive(Clone, Debug, PartialEq, Eq, CandidType, Deserialize)]
-pub enum RefundStatus {
-    NotStarted,                 // Initial state
-    InProgress { attempts: u8 }, // In progress with attempt count
-    Completed { timestamp: u64 }, // Completed with timestamp
-    Failed { reason: String }    // Final failure with reason
+// User account system for recharge-based payment model
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct UserAccount {
+    pub owner: Principal,
+    pub balance: u64,        // User balance in e8s
+    pub last_deposit: u64,   // Timestamp of last deposit
+    pub total_deposited: u64, // Total amount deposited
+    pub total_consumed: u64,  // Total amount consumed
 }
 
-// Extend DeploymentRecord with refund tracking (will be used in strategy_common)
-// This is the local extended version we use that will be serialized to the original type
-#[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct ExtendedDeploymentRecord {
-    pub deployment_id: String,
-    pub strategy_type: StrategyType,
-    pub owner: Principal,
-    pub fee_amount: u64,
-    pub request_time: u64,
-    pub status: DeploymentStatus,
-    pub canister_id: Option<Principal>,
-    pub config_data: serde_bytes::ByteBuf,
-    pub error_message: Option<String>,
-    pub last_updated: u64,
-    pub refund_status: Option<RefundStatus>,
-    pub refund_tx_id: Option<u128>,
+// Transaction types for tracking financial operations
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
+pub enum TransactionType {
+    Deposit,
+    DeploymentFee,
+    Refund,
+    AdminAdjustment,
+}
+
+// Transaction record for financial history
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct TransactionRecord {
+    pub transaction_id: String,
+    pub user: Principal,
+    pub amount: u64,
+    pub transaction_type: TransactionType,
+    pub timestamp: u64,
+    pub description: String,
 }
 
 // Memory manager and stable storage
@@ -154,6 +150,36 @@ impl Storable for DeploymentRecordBytes {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TransactionRecordBytes(pub Vec<u8>);
+
+impl Storable for TransactionRecordBytes {
+    const BOUND: Bound = Bound::Unbounded;
+
+    fn to_bytes(&self) -> Cow<[u8]> {
+        Cow::Borrowed(&self.0)
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        Self(bytes.to_vec())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct UserAccountBytes(pub Vec<u8>);
+
+impl Storable for UserAccountBytes {
+    const BOUND: Bound = Bound::Unbounded;
+
+    fn to_bytes(&self) -> Cow<[u8]> {
+        Cow::Borrowed(&self.0)
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        Self(bytes.to_vec())
+    }
+}
+
 // Global state
 thread_local! {
     // Memory manager for stable storage
@@ -181,8 +207,22 @@ thread_local! {
             MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(2)))
         )
     );
+    
+    // Map to store user accounts by principal
+    pub static USER_ACCOUNTS: RefCell<StableBTreeMap<PrincipalBytes, UserAccountBytes, Memory>> = RefCell::new(
+        StableBTreeMap::init(
+            MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(3)))
+        )
+    );
+    
+    // Store transaction records
+    pub static TRANSACTIONS: RefCell<StableBTreeMap<DeploymentIdBytes, TransactionRecordBytes, Memory>> = RefCell::new(
+        StableBTreeMap::init(
+            MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(4)))
+        )
+    );
 
-    // Map to store owner to strategies mapping
+    // Map to store owner to strategies mapping (in-memory)
     pub static OWNER_STRATEGIES: RefCell<HashMap<Principal, Vec<Principal>>> = RefCell::new(HashMap::new());
 
     // Deployment fee in e8s (100_000_000 = 1 ICP)
@@ -194,12 +234,15 @@ thread_local! {
     // Counter for deployment IDs
     pub static DEPLOYMENT_ID_COUNTER: Cell<u64> = Cell::new(0);
     
-    // Track refunds currently being processed (to prevent concurrent processing)
-    pub static REFUND_LOCKS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    // In-memory transaction cache for faster access (limited to 1000 most recent entries)
+    pub static TRANSACTION_CACHE: RefCell<Vec<TransactionRecord>> = RefCell::new(Vec::new());
+    
+    // Maximum transaction cache size
+    pub static MAX_CACHE_SIZE: Cell<usize> = Cell::new(1000);
 }
 
 // WASM module record for strategy installations
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, CandidType)]
 pub struct WasmModule {
     pub strategy_type: StrategyType,
     pub wasm_module: Vec<u8>,
@@ -218,41 +261,8 @@ pub fn generate_deployment_id() -> String {
     format!("{}-{}-{}", timestamp, caller, counter)
 }
 
-// Convert between ExtendedDeploymentRecord and DeploymentRecord
-fn extended_to_basic_record(extended: &ExtendedDeploymentRecord) -> DeploymentRecord {
-    DeploymentRecord {
-        deployment_id: extended.deployment_id.clone(),
-        strategy_type: extended.strategy_type.clone(),
-        owner: extended.owner,
-        fee_amount: extended.fee_amount,
-        request_time: extended.request_time,
-        status: extended.status.clone(),
-        canister_id: extended.canister_id,
-        config_data: extended.config_data.clone(),
-        error_message: extended.error_message.clone(),
-        last_updated: extended.last_updated,
-    }
-}
-
-fn basic_to_extended_record(record: DeploymentRecord) -> ExtendedDeploymentRecord {
-    ExtendedDeploymentRecord {
-        deployment_id: record.deployment_id,
-        strategy_type: record.strategy_type,
-        owner: record.owner,
-        fee_amount: record.fee_amount,
-        request_time: record.request_time,
-        status: record.status,
-        canister_id: record.canister_id,
-        config_data: record.config_data,
-        error_message: record.error_message,
-        last_updated: record.last_updated,
-        refund_status: None,
-        refund_tx_id: None,
-    }
-}
-
 // Store deployment record
-pub fn store_deployment_record(record: ExtendedDeploymentRecord) {
+pub fn store_deployment_record(record: DeploymentRecord) {
     let record_bytes = candid::encode_one(&record)
         .expect("Failed to encode deployment record");
     let id_bytes = record.deployment_id.as_bytes().to_vec();
@@ -265,35 +275,17 @@ pub fn store_deployment_record(record: ExtendedDeploymentRecord) {
     });
 }
 
-// Store standard DeploymentRecord (for backward compatibility)
-pub fn store_basic_deployment_record(record: DeploymentRecord) {
-    let extended = basic_to_extended_record(record);
-    store_deployment_record(extended);
-}
-
 // Get deployment record
-pub fn get_deployment_record(deployment_id: &str) -> Option<ExtendedDeploymentRecord> {
+pub fn get_deployment_record(deployment_id: &str) -> Option<DeploymentRecord> {
     let id_bytes = deployment_id.as_bytes().to_vec();
     
     DEPLOYMENT_RECORDS.with(|records| {
         records.borrow()
             .get(&DeploymentIdBytes(id_bytes))
             .and_then(|record_bytes| {
-                // Try to decode as extended record first
-                candid::decode_one::<ExtendedDeploymentRecord>(&record_bytes.0)
-                    .or_else(|_| {
-                        // If that fails, try decoding as basic record and convert
-                        candid::decode_one::<DeploymentRecord>(&record_bytes.0)
-                            .map(basic_to_extended_record)
-                    })
-                    .ok()
+                candid::decode_one::<DeploymentRecord>(&record_bytes.0).ok()
             })
     })
-}
-
-// Get deployment record as basic type (for backward compatibility)
-pub fn get_basic_deployment_record(deployment_id: &str) -> Option<DeploymentRecord> {
-    get_deployment_record(deployment_id).map(|extended| extended_to_basic_record(&extended))
 }
 
 // Update deployment record status
@@ -302,7 +294,7 @@ pub fn update_deployment_status(
     status: DeploymentStatus, 
     canister_id: Option<Principal>,
     error_message: Option<String>
-) -> Result<ExtendedDeploymentRecord, String> {
+) -> Result<(), String> {
     if let Some(mut record) = get_deployment_record(deployment_id) {
         record.status = status;
         record.last_updated = ic_cdk::api::time();
@@ -314,38 +306,6 @@ pub fn update_deployment_status(
         if let Some(error) = error_message {
             record.error_message = Some(error);
         }
-        
-        store_deployment_record(record.clone());
-        Ok(record)
-    } else {
-        Err(format!("Deployment record not found: {}", deployment_id))
-    }
-}
-
-// Update refund status
-pub fn update_refund_status(
-    deployment_id: &str,
-    refund_status: RefundStatus
-) -> Result<(), String> {
-    if let Some(mut record) = get_deployment_record(deployment_id) {
-        record.refund_status = Some(refund_status);
-        record.last_updated = ic_cdk::api::time();
-        
-        store_deployment_record(record);
-        Ok(())
-    } else {
-        Err(format!("Deployment record not found: {}", deployment_id))
-    }
-}
-
-// Update refund transaction ID
-pub fn update_refund_tx_id(
-    deployment_id: &str,
-    tx_id: Option<u128>
-) -> Result<(), String> {
-    if let Some(mut record) = get_deployment_record(deployment_id) {
-        record.refund_tx_id = tx_id;
-        record.last_updated = ic_cdk::api::time();
         
         store_deployment_record(record);
         Ok(())
@@ -446,19 +406,13 @@ pub fn get_wasm_module(strategy_type: StrategyType) -> Option<Vec<u8>> {
 }
 
 // Get all deployment records
-pub fn get_all_deployment_records() -> Vec<ExtendedDeploymentRecord> {
+pub fn get_all_deployment_records() -> Vec<DeploymentRecord> {
     let mut records = Vec::new();
     
     DEPLOYMENT_RECORDS.with(|recs| {
         for (_, record_bytes) in recs.borrow().iter() {
-            // Try to decode as extended record first
-            if let Ok(record) = candid::decode_one::<ExtendedDeploymentRecord>(&record_bytes.0) {
+            if let Ok(record) = candid::decode_one::<DeploymentRecord>(&record_bytes.0) {
                 records.push(record);
-            } else {
-                // Fall back to basic record and convert
-                if let Ok(basic_record) = candid::decode_one::<DeploymentRecord>(&record_bytes.0) {
-                    records.push(basic_to_extended_record(basic_record));
-                }
             }
         }
     });
@@ -466,16 +420,8 @@ pub fn get_all_deployment_records() -> Vec<ExtendedDeploymentRecord> {
     records
 }
 
-// Get all deployment records as basic type (for backward compatibility)
-pub fn get_all_basic_deployment_records() -> Vec<DeploymentRecord> {
-    get_all_deployment_records()
-        .into_iter()
-        .map(|extended| extended_to_basic_record(&extended))
-        .collect()
-}
-
 // Get deployment records by owner
-pub fn get_deployment_records_by_owner(owner: Principal) -> Vec<ExtendedDeploymentRecord> {
+pub fn get_deployment_records_by_owner(owner: Principal) -> Vec<DeploymentRecord> {
     get_all_deployment_records()
         .into_iter()
         .filter(|record| record.owner == owner)
@@ -483,18 +429,10 @@ pub fn get_deployment_records_by_owner(owner: Principal) -> Vec<ExtendedDeployme
 }
 
 // Get deployment records by status
-pub fn get_deployment_records_by_status(status: DeploymentStatus) -> Vec<ExtendedDeploymentRecord> {
+pub fn get_deployment_records_by_status(status: DeploymentStatus) -> Vec<DeploymentRecord> {
     get_all_deployment_records()
         .into_iter()
         .filter(|record| record.status == status)
-        .collect()
-}
-
-// Get deployment records by refund status
-pub fn get_deployment_records_by_refund_status(refund_status: &RefundStatus) -> Vec<ExtendedDeploymentRecord> {
-    get_all_deployment_records()
-        .into_iter()
-        .filter(|record| record.refund_status.as_ref() == Some(refund_status))
         .collect()
 }
 
@@ -538,11 +476,6 @@ pub fn archive_old_deployment_records() -> Result<usize, String> {
     
     // Archive each record
     for deployment_id in records_to_archive {
-        // First serialize to secondary storage if needed
-        // For now, we'll just delete but in production you might want to:
-        // 1. Serialize to a stable-backed archive BTreeMap with different memory ID
-        // 2. Or export to another canister designated for archiving
-
         // Remove from main storage
         DEPLOYMENT_RECORDS.with(|records| {
             let mut records = records.borrow_mut();
@@ -568,7 +501,7 @@ pub fn get_memory_usage_percent() -> u8 {
     let estimated_memory_usage = total_records * 500;
     
     // Assuming 4GB stable memory maximum
-    let max_memory = 10 * 1024 * 1024 * 1024;
+    let max_memory = 4 * 1024 * 1024 * 1024;
     
     // Calculate percentage
     let percentage = (estimated_memory_usage as f64 / max_memory as f64 * 100.0) as u8;
@@ -590,7 +523,8 @@ pub fn should_archive_records() -> bool {
 pub struct UpgradeData {
     pub owner_strategies: HashMap<Principal, Vec<Principal>>,
     pub admins: HashSet<Principal>,
-    pub refund_locks: HashSet<String>,
+    pub deployment_id_counter: u64,
+    pub deployment_fee: u64,
 }
 
 // Pre-upgrade data
@@ -598,7 +532,8 @@ pub fn get_upgrade_data() -> UpgradeData {
     UpgradeData {
         owner_strategies: OWNER_STRATEGIES.with(|m| m.borrow().clone()),
         admins: ADMINS.with(|a| a.borrow().clone()),
-        refund_locks: REFUND_LOCKS.with(|l| l.borrow().clone()),
+        deployment_id_counter: DEPLOYMENT_ID_COUNTER.with(|c| c.get()),
+        deployment_fee: DEPLOYMENT_FEE.with(|f| f.get()),
     }
 }
 
@@ -606,5 +541,210 @@ pub fn get_upgrade_data() -> UpgradeData {
 pub fn restore_upgrade_data(data: UpgradeData) {
     OWNER_STRATEGIES.with(|m| *m.borrow_mut() = data.owner_strategies);
     ADMINS.with(|a| *a.borrow_mut() = data.admins);
-    REFUND_LOCKS.with(|l| *l.borrow_mut() = data.refund_locks);
+    DEPLOYMENT_ID_COUNTER.with(|c| c.set(data.deployment_id_counter));
+    DEPLOYMENT_FEE.with(|f| f.set(data.deployment_fee));
+}
+
+// Generate a unique transaction ID
+pub fn generate_transaction_id() -> String {
+    // Use async/await properly with raw_rand
+    let timestamp = ic_cdk::api::time();
+    
+    // Generate a pseudo-random string for the transaction ID
+    // Instead of using raw_rand (which requires async), we'll use timestamp + counter
+    let random_part = DEPLOYMENT_ID_COUNTER.with(|counter| {
+        let value = counter.get();
+        counter.set(value.wrapping_add(1));
+        value
+    });
+    
+    format!("txn-{}-{:x}", timestamp, random_part)
+}
+
+// Store user account
+pub fn store_user_account(account: UserAccount) {
+    let account_bytes = candid::encode_one(&account)
+        .expect("Failed to encode user account");
+    let principal_bytes = account.owner.as_slice().to_vec();
+    
+    USER_ACCOUNTS.with(|accounts| {
+        accounts.borrow_mut().insert(
+            PrincipalBytes(principal_bytes),
+            UserAccountBytes(account_bytes),
+        );
+    });
+}
+
+// Get user account
+pub fn get_user_account(user: Principal) -> Option<UserAccount> {
+    let principal_bytes = user.as_slice().to_vec();
+    
+    USER_ACCOUNTS.with(|accounts| {
+        accounts.borrow()
+            .get(&PrincipalBytes(principal_bytes))
+            .and_then(|account_bytes| {
+                candid::decode_one::<UserAccount>(&account_bytes.0).ok()
+            })
+    })
+}
+
+// Store transaction record - with cache size management
+pub fn store_transaction_record(record: TransactionRecord) {
+    let record_bytes = candid::encode_one(&record)
+        .expect("Failed to encode transaction record");
+    let id_bytes = record.transaction_id.as_bytes().to_vec();
+    
+    TRANSACTIONS.with(|transactions| {
+        transactions.borrow_mut().insert(
+            DeploymentIdBytes(id_bytes),
+            TransactionRecordBytes(record_bytes),
+        );
+    });
+    
+    // Also add to the in-memory cache for faster access, with size management
+    TRANSACTION_CACHE.with(|cache| {
+        let max_size = MAX_CACHE_SIZE.with(|ms| ms.get());
+        let mut cache_ref = cache.borrow_mut();
+        
+        // Add to cache
+        cache_ref.push(record);
+        
+        // Trim cache if too large
+        if cache_ref.len() > max_size {
+            // Only keep the most recent 80% of the maximum size
+            let trim_size = (max_size as f64 * 0.8) as usize;
+            let start_index = cache_ref.len() - trim_size;
+            *cache_ref = cache_ref.split_off(start_index);
+        }
+    });
+}
+
+// Get all transaction records
+pub fn get_all_transaction_records() -> Vec<TransactionRecord> {
+    let mut records = Vec::new();
+    
+    TRANSACTIONS.with(|txns| {
+        for (_, record_bytes) in txns.borrow().iter() {
+            if let Ok(record) = candid::decode_one::<TransactionRecord>(&record_bytes.0) {
+                records.push(record);
+            }
+        }
+    });
+    
+    records
+}
+
+// Get transaction records for a user
+pub fn get_user_transaction_records(user: Principal) -> Vec<TransactionRecord> {
+    // First try to get from cache for better performance
+    let from_cache = TRANSACTION_CACHE.with(|cache| {
+        cache.borrow()
+            .iter()
+            .filter(|record| record.user == user)
+            .cloned()
+            .collect::<Vec<_>>()
+    });
+    
+    if !from_cache.is_empty() {
+        return from_cache;
+    }
+    
+    // Fall back to stable storage if cache is empty
+    get_all_transaction_records()
+        .into_iter()
+        .filter(|record| record.user == user)
+        .collect()
+}
+
+// Record a new transaction
+pub fn record_transaction(
+    user: Principal, 
+    amount: u64, 
+    transaction_type: TransactionType, 
+    description: String
+) -> String {
+    let transaction_id = generate_transaction_id();
+    
+    let record = TransactionRecord {
+        transaction_id: transaction_id.clone(),
+        user,
+        amount,
+        transaction_type,
+        timestamp: ic_cdk::api::time(),
+        description,
+    };
+    
+    store_transaction_record(record);
+    
+    transaction_id
+}
+
+// Update user balance
+pub fn update_user_balance(user: Principal, amount: u64, is_deposit: bool) -> Result<u64, String> {
+    let mut account = get_user_account(user).unwrap_or(UserAccount {
+        owner: user,
+        balance: 0,
+        last_deposit: 0,
+        total_deposited: 0,
+        total_consumed: 0,
+    });
+    
+    if is_deposit {
+        account.balance = account.balance.saturating_add(amount);
+        account.last_deposit = ic_cdk::api::time();
+        account.total_deposited = account.total_deposited.saturating_add(amount);
+    } else {
+        if account.balance < amount {
+            return Err(format!(
+                "Insufficient balance: current balance {} e8s, required {} e8s", 
+                account.balance, amount
+            ));
+        }
+        
+        account.balance = account.balance.saturating_sub(amount);
+        account.total_consumed = account.total_consumed.saturating_add(amount);
+    }
+    
+    store_user_account(account.clone());
+    
+    Ok(account.balance)
+}
+
+// Check if user has sufficient balance
+pub fn check_user_balance(user: Principal, amount: u64) -> Result<bool, String> {
+    match get_user_account(user) {
+        Some(account) => Ok(account.balance >= amount),
+        None => Ok(false), // New users have zero balance
+    }
+}
+
+// Pre-upgrade and post-upgrade functions
+pub fn pre_upgrade() {
+    // Store memory-only data that needs to survive upgrades
+    let upgrade_data = get_upgrade_data();
+    
+    match ic_cdk::storage::stable_save((upgrade_data,)) {
+        Ok(_) => (),
+        Err(e) => ic_cdk::trap(&format!("Failed to save stable data: {}", e)),
+    }
+    
+    // Rebuild transaction cache on next startup
+    TRANSACTION_CACHE.with(|cache| {
+        cache.borrow_mut().clear();
+    });
+}
+
+pub fn post_upgrade() {
+    match ic_cdk::storage::stable_restore::<(UpgradeData,)>() {
+        Ok((data,)) => {
+            restore_upgrade_data(data);
+            
+            // Rebuild the transaction cache from stable storage
+            let transactions = get_all_transaction_records();
+            TRANSACTION_CACHE.with(|cache| {
+                *cache.borrow_mut() = transactions;
+            });
+        }
+        Err(e) => ic_cdk::trap(&format!("Failed to restore stable data: {}", e)),
+    }
 } 

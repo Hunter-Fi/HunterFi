@@ -164,9 +164,170 @@ pub enum OrderSplitType {
     SplitBoth,                          // Split both buy and sell orders
 }
 
+/// Deployment process status
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum DeploymentStatus {
+    PendingPayment,
+    AuthorizationConfirmed,
+    PaymentReceived,
+    CanisterCreated,
+    CodeInstalled,
+    Initialized,
+    Deployed,
+    DeploymentCancelled,
+    DeploymentFailed,
+    Refunding,
+    Refunded,
+}
+
+/// Deployment record
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct DeploymentRecord {
+    pub deployment_id: String,
+    pub strategy_type: StrategyType,
+    pub owner: Principal,
+    pub fee_amount: u64,
+    pub request_time: u64,
+    pub status: DeploymentStatus,
+    pub canister_id: Option<Principal>,
+    pub config_data: ByteBuf,  // Serialized config
+    pub error_message: Option<String>,
+    pub last_updated: u64,
+}
+
+/// Factory canister response for deployment requests
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct DeploymentRequest {
+    pub deployment_id: String,
+    pub fee_amount: u64,
+    pub strategy_type: StrategyType,
+}
+
 /// Factory canister response for strategy deployment
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub enum DeploymentResult {
     Success(Principal),
     Error(String),
+}
+
+/// Trait for strategy configurations to provide common validation functionality
+pub trait StrategyConfig {
+    /// Validate the configuration parameters
+    fn validate(&self) -> Result<(), String>;
+    
+    /// Get the strategy type
+    fn get_strategy_type(&self) -> StrategyType;
+    
+    /// Get the exchange being used
+    fn get_exchange(&self) -> Exchange;
+}
+
+impl StrategyConfig for DCAConfig {
+    fn validate(&self) -> Result<(), String> {
+        if self.amount_per_execution == 0 {
+            return Err("Amount per execution must be greater than 0".to_string());
+        }
+        
+        if self.interval_secs == 0 {
+            return Err("Interval must be greater than 0".to_string());
+        }
+        
+        Ok(())
+    }
+    
+    fn get_strategy_type(&self) -> StrategyType {
+        StrategyType::DollarCostAveraging
+    }
+    
+    fn get_exchange(&self) -> Exchange {
+        self.exchange.clone()
+    }
+}
+
+impl StrategyConfig for ValueAvgConfig {
+    fn validate(&self) -> Result<(), String> {
+        if self.target_value_increase == 0 {
+            return Err("Target value increase must be greater than 0".to_string());
+        }
+        
+        if self.interval_secs == 0 {
+            return Err("Interval must be greater than 0".to_string());
+        }
+        
+        Ok(())
+    }
+    
+    fn get_strategy_type(&self) -> StrategyType {
+        StrategyType::ValueAveraging
+    }
+    
+    fn get_exchange(&self) -> Exchange {
+        self.exchange.clone()
+    }
+}
+
+impl StrategyConfig for FixedBalanceConfig {
+    fn validate(&self) -> Result<(), String> {
+        if self.token_allocations.is_empty() {
+            return Err("Token allocations cannot be empty".to_string());
+        }
+        
+        if self.interval_secs == 0 {
+            return Err("Interval must be greater than 0".to_string());
+        }
+        
+        Ok(())
+    }
+    
+    fn get_strategy_type(&self) -> StrategyType {
+        StrategyType::FixedBalance
+    }
+    
+    fn get_exchange(&self) -> Exchange {
+        self.exchange.clone()
+    }
+}
+
+impl StrategyConfig for LimitOrderConfig {
+    fn validate(&self) -> Result<(), String> {
+        if self.amount == 0 {
+            return Err("Amount must be greater than 0".to_string());
+        }
+        
+        if self.price == 0 {
+            return Err("Price must be greater than 0".to_string());
+        }
+        
+        Ok(())
+    }
+    
+    fn get_strategy_type(&self) -> StrategyType {
+        StrategyType::LimitOrder
+    }
+    
+    fn get_exchange(&self) -> Exchange {
+        self.exchange.clone()
+    }
+}
+
+impl StrategyConfig for SelfHedgingConfig {
+    fn validate(&self) -> Result<(), String> {
+        if self.transaction_size == 0 {
+            return Err("Transaction size must be greater than 0".to_string());
+        }
+        
+        if self.check_interval_secs == 0 {
+            return Err("Check interval must be greater than 0".to_string());
+        }
+        
+        Ok(())
+    }
+    
+    fn get_strategy_type(&self) -> StrategyType {
+        StrategyType::SelfHedging
+    }
+    
+    fn get_exchange(&self) -> Exchange {
+        self.exchange.clone()
+    }
 } 

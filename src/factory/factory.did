@@ -46,15 +46,12 @@ type StrategyStatus = variant {
 };
 
 type DeploymentStatus = variant {
-  PendingPayment;
-  AuthorizationConfirmed;
   PaymentReceived;
   CanisterCreated;
   CodeInstalled;
   Initialized;
   Deployed;
   DeploymentFailed;
-  Refunding;
   Refunded;
 };
 
@@ -144,13 +141,34 @@ type WasmModule = record {
   wasm_module : blob;
 };
 
-type UpgradeData = record {
-  owner_strategies : vec record { principal; vec principal };
-  admins : vec principal;
+type UserAccount = record {
+  owner : principal;
+  balance : nat64;
+  last_deposit : nat64;
+  total_deposited : nat64;
+  total_consumed : nat64;
+};
+
+type TransactionType = variant {
+  Deposit;
+  DeploymentFee;
+  Refund;
+  AdminAdjustment;
+};
+
+type TransactionRecord = record {
+  transaction_id : text;
+  user : principal;
+  amount : nat64;
+  transaction_type : TransactionType;
+  timestamp : nat64;
+  description : text;
 };
 
 service : {
-  // Admin functions
+  // ===== Administration =====
+  
+  // Admin role management
   add_admin : (principal) -> (variant { Ok; Err : text });
   remove_admin : (principal) -> (variant { Ok; Err : text });
   get_admins : () -> (vec principal) query;
@@ -160,10 +178,26 @@ service : {
   install_strategy_wasm : (WasmModule) -> (variant { Ok; Err : text });
   get_strategy_wasm : (StrategyType) -> (opt blob) query;
 
+  // System maintenance
+  reset_system_timers : () -> (variant { Ok; Err : text });
+  get_timer_status : () -> (text) query;
+
   // Deployment fee management
   set_deployment_fee : (nat64) -> (variant { Ok; Err : text });
   get_deployment_fee : () -> (nat64) query;
 
+  // ===== Strategy Deployment =====
+  
+  // Strategy deployment API
+  request_dca_strategy : (DCAConfig) -> (variant { Ok : DeploymentRequest; Err : text });
+  request_value_avg_strategy : (ValueAvgConfig) -> (variant { Ok : DeploymentRequest; Err : text });
+  request_fixed_balance_strategy : (FixedBalanceConfig) -> (variant { Ok : DeploymentRequest; Err : text });
+  request_limit_order_strategy : (LimitOrderConfig) -> (variant { Ok : DeploymentRequest; Err : text });
+  request_self_hedging_strategy : (SelfHedgingConfig) -> (variant { Ok : DeploymentRequest; Err : text });
+  force_execute_deployment : (text) -> (variant { Ok : DeploymentResult; Err : text });
+
+  // ===== Strategy Management =====
+  
   // Strategy registry queries
   get_strategies_by_owner : (principal) -> (vec StrategyMetadata) query;
   get_all_strategies : () -> (vec StrategyMetadata) query;
@@ -175,35 +209,17 @@ service : {
   get_my_deployment_records : () -> (vec DeploymentRecord) query;
   get_deployment : (text) -> (opt DeploymentRecord) query;
 
-  // New deployment request API
-  request_dca_strategy : (DCAConfig) -> (variant { Ok : DeploymentRequest; Err : text });
-  request_value_avg_strategy : (ValueAvgConfig) -> (variant { Ok : DeploymentRequest; Err : text });
-  request_fixed_balance_strategy : (FixedBalanceConfig) -> (variant { Ok : DeploymentRequest; Err : text });
-  request_limit_order_strategy : (LimitOrderConfig) -> (variant { Ok : DeploymentRequest; Err : text });
-  request_self_hedging_strategy : (SelfHedgingConfig) -> (variant { Ok : DeploymentRequest; Err : text });
+  // ===== Finance Management =====
 
-  // Deployment confirmation
-  confirm_deployment : (text) -> (variant { Ok; Err : text });
-
-  // Legacy direct deployment functions (kept for backward compatibility)
-  deploy_dca_strategy : (DCAConfig) -> (DeploymentResult);
-  deploy_value_avg_strategy : (ValueAvgConfig) -> (DeploymentResult);
-  deploy_fixed_balance_strategy : (FixedBalanceConfig) -> (DeploymentResult);
-  deploy_limit_order_strategy : (LimitOrderConfig) -> (DeploymentResult);
-  deploy_self_hedging_strategy : (SelfHedgingConfig) -> (DeploymentResult);
-
-  // Admin-only force execution
-  force_execute_deployment : (text) -> (variant { Ok : DeploymentResult; Err : text });
-
-  // Refund management
-  request_refund : (text) -> (variant { Ok; Err : text });
-
-  // Timer management functions (admin only)
-  restart_timers : () -> (variant { Ok; Err : text });
-  trigger_status_processing : () -> (variant { Ok; Err : text });
-  trigger_failed_deployment_processing : () -> (variant { Ok; Err : text });
-
-  // Cycles & funds management
+  // Cycles & ICP management
   get_cycles_balance : () -> (nat64) query;
   withdraw_icp : (principal, nat64) -> (variant { Ok; Err : text });
+
+  // User balance management
+  deposit_icp : (nat64) -> (variant { Ok : nat64; Err : text });
+  withdraw_user_icp : (nat64) -> (variant { Ok : nat64; Err : text });
+  get_balance : () -> (nat64) query;
+  get_account_info : () -> (opt UserAccount) query;
+  get_transaction_history : () -> (vec TransactionRecord) query;
+  adjust_balance : (principal, nat64, text) -> (variant { Ok; Err : text });
 } 

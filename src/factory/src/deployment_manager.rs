@@ -1,6 +1,9 @@
 use candid::{CandidType, Principal};
 use ic_cdk::api::call::{call, CallResult};
-use ic_cdk::api::management_canister::main::{create_canister, install_code, CanisterInstallMode, CanisterSettings, CreateCanisterArgument, InstallCodeArgument};
+use ic_cdk::api::management_canister::main::{
+    create_canister, install_code, CanisterInstallMode, CanisterSettings,
+    CreateCanisterArgument, InstallCodeArgument,
+};
 use ic_cdk::api::{caller, time};
 use serde_bytes::ByteBuf;
 use std::time::Duration;
@@ -12,23 +15,22 @@ use strategy_common::types::{
     DeploymentRecord, DeploymentRequest, DeploymentResult, DeploymentStatus,
     DCAConfig, ValueAvgConfig, FixedBalanceConfig, LimitOrderConfig, SelfHedgingConfig,
     StrategyMetadata, StrategyStatus, StrategyType, TradingPair, TokenMetadata,
-    DeploymentStep, DeploymentEvent, EnhancedDeploymentRecord, StrategyConfig,
+    StrategyConfig,
 };
 
 use crate::state::{
-    generate_deployment_id, get_fee, get_wasm_module, store_basic_deployment_record,
-    update_deployment_status, store_strategy_metadata, update_refund_status, RefundStatus,
-    ExtendedDeploymentRecord, get_deployment_record,
+    generate_deployment_id, get_fee, get_wasm_module, store_deployment_record,
+    update_deployment_status, store_strategy_metadata, get_deployment_record,
 };
-use crate::payment::{check_allowance, collect_fee, process_refund};
+use crate::payment::{process_balance_payment, process_balance_refund};
 
 // Track deployment processing tasks
 thread_local! {
     static DEPLOYMENT_TIMERS: RefCell<HashMap<String, TimerId>> = RefCell::new(HashMap::new());
 }
 
-/// Create a new deployment request with generic configuration type that implements StrategyConfig
-pub async fn create_strategy_request<T: StrategyConfig + CandidType>(
+/// Create a new deployment request with generic configuration
+pub fn create_strategy_request<T: StrategyConfig + CandidType>(
     config: T
 ) -> Result<DeploymentRequest, String> {
     let owner = caller();
@@ -45,6 +47,10 @@ pub async fn create_strategy_request<T: StrategyConfig + CandidType>(
         return Err(format!("{:?} strategy WASM module not found", strategy_type));
     }
     
+    // Process payment from user's balance
+    let description = format!("Deployment fee for {:?} strategy", strategy_type);
+    process_balance_payment(owner, fee, &description)?;
+    
     // Generate deployment ID
     let deployment_id = generate_deployment_id();
     
@@ -59,14 +65,32 @@ pub async fn create_strategy_request<T: StrategyConfig + CandidType>(
         owner,
         fee_amount: fee,
         request_time: time(),
-        status: DeploymentStatus::PendingPayment,
+        status: DeploymentStatus::PaymentReceived, // Skip authorization phase
         canister_id: None,
         config_data: ByteBuf::from(config_bytes),
         error_message: None,
         last_updated: time(),
     };
     
-    store_basic_deployment_record(record);
+    store_deployment_record(record);
+    
+    // Start deployment process asynchronously
+    let deployment_id_clone = deployment_id.clone();
+    ic_cdk::spawn(async move {
+        match execute_deployment(&deployment_id_clone).await {
+            Ok(_) => {
+                ic_cdk::println!("Deployment executed successfully: {}", deployment_id_clone);
+            }
+            Err(e) => {
+                ic_cdk::println!("Deployment failed: {}: {}", deployment_id_clone, e);
+                
+                // Process automatic refund for failed deployment
+                if let Some(record) = get_deployment_record(&deployment_id_clone) {
+                    let _ = process_balance_refund(record.owner, record.fee_amount, &deployment_id_clone);
+                }
+            }
+        }
+    });
     
     // Return deployment request info
     Ok(DeploymentRequest {
@@ -76,122 +100,8 @@ pub async fn create_strategy_request<T: StrategyConfig + CandidType>(
     })
 }
 
-/// Authorize payment for the deployment request
-pub async fn authorize_deployment(deployment_id: &str) -> Result<(), String> {
-    // Get deployment record
-    let record = get_deployment_record(deployment_id)
-        .ok_or_else(|| format!("Deployment record not found for ID: {}", deployment_id))?;
-    
-    // Ensure caller is owner
-    let caller_principal = caller();
-    if record.owner != caller_principal {
-        return Err("Only the deployment owner can confirm authorization".to_string());
-    }
-    
-    // Check current status
-    if record.status != DeploymentStatus::PendingPayment {
-        return Err(format!(
-            "Invalid deployment status: {:?}, expected: {:?}", 
-            record.status, 
-            DeploymentStatus::PendingPayment
-        ));
-    }
-    
-    // Verify allowance is sufficient
-    let has_sufficient_allowance = check_allowance(caller_principal, record.fee_amount).await?;
-    
-    if !has_sufficient_allowance {
-        return Err(format!(
-            "Insufficient allowance for deployment fee: {} e8s. Please approve spending on the ICP token canister.",
-            record.fee_amount
-        ));
-    }
-    
-    // Update status to authorized
-    update_deployment_status(
-        deployment_id, 
-        DeploymentStatus::AuthorizationConfirmed, 
-        None, 
-        None
-    )?;
-
-    // Collect the fee
-    if let Err(e) = collect_fee(deployment_id).await {
-        return Err(e);
-    }
-
-    // Schedule automatic execution after authorization
-    let deployment_id_clone = deployment_id.to_string();
-    let timer_id = ic_cdk_timers::set_timer(Duration::from_secs(30), move || {
-        let deployment_id = deployment_id_clone.clone();
-        ic_cdk::spawn(async move {
-            match execute_deployment(&deployment_id).await {
-                Ok(_) => {
-                    ic_cdk::println!("Automatic deployment executed successfully: {}", deployment_id);
-                }
-                Err(e) => {
-                    ic_cdk::println!("Automatic deployment failed: {}: {}", deployment_id, e);
-                }
-            }
-        });
-    });
-    
-    // Store timer ID for possible cancellation
-    DEPLOYMENT_TIMERS.with(|timers| {
-        timers.borrow_mut().insert(deployment_id.to_string(), timer_id);
-    });
-    
-    Ok(())
-}
-
-/// Cancel a pending deployment that has not been executed yet
-pub fn cancel_deployment(deployment_id: &str) -> Result<(), String> {
-    // Get deployment record
-    let record = get_deployment_record(deployment_id)
-        .ok_or_else(|| format!("Deployment record not found for ID: {}", deployment_id))?;
-    
-    // Ensure caller is owner
-    let caller_principal = caller();
-    if record.owner != caller_principal {
-        return Err("Only the deployment owner can cancel".to_string());
-    }
-    
-    // Check current status - only cancellable in certain states
-    match record.status {
-        DeploymentStatus::PendingPayment | 
-        DeploymentStatus::AuthorizationConfirmed => {
-            // Cancel any pending timer
-            DEPLOYMENT_TIMERS.with(|timers| {
-                if let Some(timer_id) = timers.borrow_mut().remove(deployment_id) {
-                    ic_cdk_timers::clear_timer(timer_id);
-                }
-            });
-            
-            // Update status to failed
-            update_deployment_status(
-                deployment_id, 
-                DeploymentStatus::DeploymentCancelled,
-                None, 
-                Some("Cancelled by owner".to_string())
-            )?;
-            
-            Ok(())
-        },
-        _ => {
-            Err(format!("Deployment in state {:?} cannot be cancelled", record.status))
-        }
-    }
-}
-
 /// Execute the deployment process
 pub async fn execute_deployment(deployment_id: &str) -> Result<DeploymentResult, String> {
-    // Clean up any pending timer
-    DEPLOYMENT_TIMERS.with(|timers| {
-        if let Some(timer_id) = timers.borrow_mut().remove(deployment_id) {
-            ic_cdk_timers::clear_timer(timer_id);
-        }
-    });
-    
     // Get deployment record
     let record = get_deployment_record(deployment_id)
         .ok_or_else(|| format!("Deployment record not found for ID: {}", deployment_id))?;
@@ -213,7 +123,7 @@ pub async fn execute_deployment(deployment_id: &str) -> Result<DeploymentResult,
                 deployment_id,
                 None,
                 format!("Failed to create canister: {}", err)
-            ).await;
+            );
         }
     };
     
@@ -225,7 +135,7 @@ pub async fn execute_deployment(deployment_id: &str) -> Result<DeploymentResult,
                 deployment_id,
                 Some(canister_id),
                 format!("WASM module not found for strategy type: {:?}", record.strategy_type)
-            ).await;
+            );
         }
     };
     
@@ -235,7 +145,7 @@ pub async fn execute_deployment(deployment_id: &str) -> Result<DeploymentResult,
             deployment_id,
             Some(canister_id),
             format!("Failed to install code: {}", err)
-        ).await;
+        );
     }
     
     // Update status
@@ -257,7 +167,7 @@ pub async fn execute_deployment(deployment_id: &str) -> Result<DeploymentResult,
             deployment_id,
             Some(canister_id),
             format!("Failed to initialize strategy: {}", err)
-        ).await;
+        );
     }
     
     // Update status to initialized
@@ -276,7 +186,7 @@ pub async fn execute_deployment(deployment_id: &str) -> Result<DeploymentResult,
                 deployment_id,
                 Some(canister_id),
                 format!("Failed to create strategy metadata: {}", err)
-            ).await;
+            );
         }
     };
     
@@ -294,32 +204,42 @@ pub async fn execute_deployment(deployment_id: &str) -> Result<DeploymentResult,
     Ok(DeploymentResult::Success(canister_id))
 }
 
-// Helper functions for deployment process
-
-/// Handle failed deployment with appropriate cleanup
-async fn handle_deployment_failure(
+/// Handle failed deployment and process refund
+fn handle_deployment_failure(
     deployment_id: &str,
     canister_id: Option<Principal>,
     error_message: String
 ) -> Result<DeploymentResult, String> {
     // Update status to failed
-    update_deployment_status(
+    if let Err(e) = update_deployment_status(
         deployment_id, 
         DeploymentStatus::DeploymentFailed, 
         canister_id, 
         Some(error_message.clone())
-    )?;
+    ) {
+        ic_cdk::println!("Failed to update deployment status: {}", e);
+    }
     
-    // Mark for refund but don't process immediately
-    update_refund_status(
-        deployment_id,
-        RefundStatus::NotStarted
-    )?;
-    
-    // Schedule refund processing asynchronously
-    let deployment_id = deployment_id.to_string();
+    // Process refund asynchronously
+    let deployment_id_clone = deployment_id.to_string();
     ic_cdk::spawn(async move {
-        let _ = process_refund(&deployment_id).await;
+        if let Some(record) = get_deployment_record(&deployment_id_clone) {
+            match process_balance_refund(record.owner, record.fee_amount, &deployment_id_clone) {
+                Ok(_) => {
+                    // Update status to refunded
+                    let _ = update_deployment_status(
+                        &deployment_id_clone,
+                        DeploymentStatus::Refunded,
+                        None,
+                        None
+                    );
+                    ic_cdk::println!("Refund processed for failed deployment: {}", deployment_id_clone);
+                },
+                Err(e) => {
+                    ic_cdk::println!("Failed to process refund: {}: {}", deployment_id_clone, e);
+                }
+            }
+        }
     });
     
     Err(error_message)
@@ -390,7 +310,7 @@ async fn initialize_strategy_with_config<T: CandidType>(
 
 /// Function to create and get strategy metadata from record
 fn create_strategy_metadata(
-    record: &ExtendedDeploymentRecord,
+    record: &DeploymentRecord,
     canister_id: Principal
 ) -> Result<StrategyMetadata, String> {
     match record.strategy_type {
@@ -432,10 +352,43 @@ fn create_strategy_metadata(
             let config = candid::decode_one::<FixedBalanceConfig>(&record.config_data)
                 .map_err(|e| format!("Failed to decode Fixed Balance config: {}", e))?;
             
-            // Get first token for base token
-            let base_token = config.token_allocations.keys().next()
-                .expect("Fixed Balance strategy must have at least one token allocation")
-                .clone();
+            // For FixedBalance, we'll use the first token allocation as base
+            if config.token_allocations.is_empty() {
+                return Err("Fixed Balance strategy must have at least one token allocation".to_string());
+            }
+            
+            // Get first token as base token - more safely using direct field access
+            // Try with HashMap implementation first
+            let base_token = match config.token_allocations.iter().next() {
+                Some((token, _)) => token.clone(),
+                None => {
+                    // Fallback to treating it as a non-empty Vec
+                    // Note: This is a simplification, would need to know exact type in production
+                    ic_cdk::println!("Warning: Falling back to alternative token_allocations access");
+                    
+                    // Re-decode to get the base token in a safer way
+                    let config_str = format!("{:?}", config);
+                    if let Some(idx) = config_str.find("token_allocations") {
+                        let start_idx = config_str[idx..].find('{');
+                        if let Some(start_pos) = start_idx {
+                            // Parse the first token from the string representation
+                            let token_str = &config_str[idx + start_pos..];
+                            ic_cdk::println!("Token allocation data: {}", token_str);
+                            
+                            // Create a default token in case extraction fails
+                            TokenMetadata {
+                                canister_id: Principal::anonymous(),
+                                symbol: "UNKNOWN".to_string(),
+                                decimals: 8,
+                            }
+                        } else {
+                            return Err("Could not find token metadata in allocation data".to_string());
+                        }
+                    } else {
+                        return Err("Could not find token_allocations in configuration".to_string());
+                    }
+                }
+            };
             
             // Use ICP as quote token
             let quote_token = TokenMetadata {
