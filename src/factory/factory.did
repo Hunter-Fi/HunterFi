@@ -1,3 +1,11 @@
+type Exchange = variant {
+  ICPSwap;
+  KongSwap;
+  Sonic;
+  InfinitySwap;
+  ICDex;
+};
+
 type TokenMetadata = record {
   canister_id : principal;
   symbol : text;
@@ -9,12 +17,16 @@ type TradingPair = record {
   quote_token : TokenMetadata;
 };
 
-type Exchange = variant {
-  ICPSwap;
-  KongSwap;
-  Sonic;
-  InfinitySwap;
-  ICDex;
+type OrderSplitType = variant {
+  NoSplit;
+  SplitBuy;
+  SplitSell;
+  SplitBoth;
+};
+
+type OrderType = variant {
+  Buy;
+  Sell;
 };
 
 type StrategyType = variant {
@@ -23,18 +35,6 @@ type StrategyType = variant {
   FixedBalance;
   LimitOrder;
   SelfHedging;
-};
-
-type OrderType = variant {
-  Buy;
-  Sell;
-};
-
-type OrderSplitType = variant {
-  NoSplit;
-  SplitBuy;
-  SplitSell;
-  SplitBoth;
 };
 
 type StrategyStatus = variant {
@@ -46,12 +46,16 @@ type StrategyStatus = variant {
 };
 
 type DeploymentStatus = variant {
+  PendingPayment;
+  AuthorizationConfirmed;
   PaymentReceived;
   CanisterCreated;
   CodeInstalled;
   Initialized;
   Deployed;
+  DeploymentCancelled;
   DeploymentFailed;
+  Refunding;
   Refunded;
 };
 
@@ -73,7 +77,7 @@ type DeploymentRecord = record {
   request_time : nat64;
   status : DeploymentStatus;
   canister_id : opt principal;
-  config_data : blob;
+  config_data : vec nat8;
   error_message : opt text;
   last_updated : nat64;
 };
@@ -89,68 +93,10 @@ type DeploymentResult = variant {
   Error : text;
 };
 
-type DCAConfig = record {
-  exchange : Exchange;
-  base_token : TokenMetadata;
-  quote_token : TokenMetadata;
-  amount_per_execution : nat;
-  interval_secs : nat64;
-  max_executions : opt nat64;
-  slippage_tolerance : float64;
-};
-
-type ValueAvgConfig = record {
-  exchange : Exchange;
-  base_token : TokenMetadata;
-  quote_token : TokenMetadata;
-  target_value_increase : nat;
-  interval_secs : nat64;
-  max_executions : opt nat64;
-  slippage_tolerance : float64;
-};
-
-type FixedBalanceConfig = record {
-  exchange : Exchange;
-  token_allocations : vec record { TokenMetadata; float64 };
-  rebalance_threshold : float64;
-  interval_secs : nat64;
-  slippage_tolerance : float64;
-};
-
-type LimitOrderConfig = record {
-  exchange : Exchange;
-  base_token : TokenMetadata;
-  quote_token : TokenMetadata;
-  order_type : OrderType;
-  price : nat;
-  amount : nat;
-  expiration : opt nat64;
-};
-
-type SelfHedgingConfig = record {
-  exchange : Exchange;
-  trading_token : TokenMetadata;
-  transaction_size : nat;
-  order_split_type : OrderSplitType;
-  check_interval_secs : nat64;
-  slippage_tolerance : float64;
-};
-
-type WasmModule = record {
-  strategy_type : StrategyType;
-  wasm_module : blob;
-};
-
-type UserAccount = record {
-  owner : principal;
-  balance : nat64;
-  last_deposit : nat64;
-  total_deposited : nat64;
-  total_consumed : nat64;
-};
-
 type TransactionType = variant {
   Deposit;
+  Withdrawal;
+  Transfer;
   DeploymentFee;
   Refund;
   AdminAdjustment;
@@ -161,65 +107,103 @@ type TransactionRecord = record {
   user : principal;
   amount : nat64;
   transaction_type : TransactionType;
-  timestamp : nat64;
   description : text;
+  timestamp : nat64;
+};
+
+type UserAccount = record {
+  owner : principal;
+  balance : nat64;
+  total_deposited : nat64;
+  total_consumed : nat64;
+  last_deposit : nat64;
 };
 
 service : {
-  // ===== Administration =====
-  
-  // Admin role management
+  // Admin management
   add_admin : (principal) -> (variant { Ok; Err : text });
   remove_admin : (principal) -> (variant { Ok; Err : text });
   get_admins : () -> (vec principal) query;
   is_caller_admin : () -> (bool) query;
-
-  // WASM module management
-  install_strategy_wasm : (WasmModule) -> (variant { Ok; Err : text });
-  get_strategy_wasm : (StrategyType) -> (opt blob) query;
-
-  // System maintenance
-  reset_system_timers : () -> (variant { Ok; Err : text });
-  get_timer_status : () -> (text) query;
-
-  // Deployment fee management
+  
+  // Strategy management
+  get_strategy_wasm : (StrategyType) -> (opt vec nat8) query;
   set_deployment_fee : (nat64) -> (variant { Ok; Err : text });
   get_deployment_fee : () -> (nat64) query;
-
-  // ===== Strategy Deployment =====
-  
-  // Strategy deployment API
-  request_dca_strategy : (DCAConfig) -> (variant { Ok : DeploymentRequest; Err : text });
-  request_value_avg_strategy : (ValueAvgConfig) -> (variant { Ok : DeploymentRequest; Err : text });
-  request_fixed_balance_strategy : (FixedBalanceConfig) -> (variant { Ok : DeploymentRequest; Err : text });
-  request_limit_order_strategy : (LimitOrderConfig) -> (variant { Ok : DeploymentRequest; Err : text });
-  request_self_hedging_strategy : (SelfHedgingConfig) -> (variant { Ok : DeploymentRequest; Err : text });
-  force_execute_deployment : (text) -> (variant { Ok : DeploymentResult; Err : text });
-
-  // ===== Strategy Management =====
-  
-  // Strategy registry queries
   get_strategies_by_owner : (principal) -> (vec StrategyMetadata) query;
   get_all_strategies : () -> (vec StrategyMetadata) query;
   get_strategy : (principal) -> (opt StrategyMetadata) query;
   get_strategy_count : () -> (nat64) query;
-
-  // Deployment record management
+  
+  // Deployment management
   get_deployment_records : () -> (vec DeploymentRecord) query;
   get_my_deployment_records : () -> (vec DeploymentRecord) query;
   get_deployment : (text) -> (opt DeploymentRecord) query;
-
-  // ===== Finance Management =====
-
-  // Cycles & ICP management
-  get_cycles_balance : () -> (nat64) query;
-  withdraw_icp : (principal, nat64) -> (variant { Ok; Err : text });
-
-  // User balance management
+  force_execute_deployment : (text) -> (variant { Ok : DeploymentResult; Err : text });
+  
+  // Strategy deployment requests
+  request_dca_strategy : (record { 
+    exchange : Exchange;
+    base_token : TokenMetadata;
+    quote_token : TokenMetadata;
+    amount_per_execution : nat;
+    interval_secs : nat64;
+    max_executions : opt nat64;
+    slippage_tolerance : float64;
+  }) -> (variant { Ok : DeploymentRequest; Err : text });
+  
+  request_value_avg_strategy : (record { 
+    exchange : Exchange;
+    base_token : TokenMetadata;
+    quote_token : TokenMetadata;
+    target_value_increase : nat;
+    interval_secs : nat64;
+    max_executions : opt nat64;
+    slippage_tolerance : float64;
+  }) -> (variant { Ok : DeploymentRequest; Err : text });
+  
+  request_fixed_balance_strategy : (record { 
+    exchange : Exchange;
+    token_allocations : vec record { text; float64 };
+    rebalance_threshold : float64;
+    interval_secs : nat64;
+    slippage_tolerance : float64;
+  }) -> (variant { Ok : DeploymentRequest; Err : text });
+  
+  request_limit_order_strategy : (record { 
+    exchange : Exchange;
+    base_token : TokenMetadata;
+    quote_token : TokenMetadata;
+    order_type : OrderType;
+    price : nat;
+    amount : nat;
+    expiration : opt nat64;
+    slippage_tolerance : float64;
+  }) -> (variant { Ok : DeploymentRequest; Err : text });
+  
+  request_self_hedging_strategy : (record { 
+    exchange : Exchange;
+    trading_token : TokenMetadata;
+    transaction_size : nat;
+    order_split_type : OrderSplitType;
+    check_interval_secs : nat64;
+    slippage_tolerance : float64;
+  }) -> (variant { Ok : DeploymentRequest; Err : text });
+  
+  // User account management
   deposit_icp : (nat64) -> (variant { Ok : nat64; Err : text });
   withdraw_user_icp : (nat64) -> (variant { Ok : nat64; Err : text });
   get_balance : () -> (nat64) query;
-  get_account_info : () -> (opt UserAccount) query;
+  get_account_info : () -> (UserAccount) query;
   get_transaction_history : () -> (vec TransactionRecord) query;
+  
+  // Admin operations
+  withdraw_icp : (principal, nat64) -> (variant { Ok; Err : text });
   adjust_balance : (principal, nat64, text) -> (variant { Ok; Err : text });
-} 
+  
+  // System management
+  reset_system_timers : () -> (variant { Ok; Err : text });
+  get_timer_status : () -> (text) query;
+  get_cycles_balance : () -> (nat64) query;
+  get_version : () -> (text) query;
+}

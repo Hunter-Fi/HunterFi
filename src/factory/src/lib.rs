@@ -1,8 +1,5 @@
-mod api;
-mod state;
-mod deployment_manager;
-mod payment;
-mod timer;
-
-// Publicly re-export the API
-pub use api::*; 
+pub mod api;
+pub mod deployment_manager;
+pub mod payment;
+pub mod state;
+pub mod timer;

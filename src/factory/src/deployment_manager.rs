@@ -3,73 +3,151 @@ use ic_cdk::api::call::{call, CallResult};
 use ic_cdk::api::management_canister::main::{
     create_canister, install_code, CanisterInstallMode, CanisterSettings,
     CreateCanisterArgument, InstallCodeArgument,
+    UpdateSettingsArgument,
 };
 use ic_cdk::api::{caller, time};
 use serde_bytes::ByteBuf;
-use std::time::Duration;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use ic_cdk_timers::TimerId;
+use ic_cdk::id;
+use ic_cdk::trap;
+
+// Use include_bytes! macro to directly embed WASM files
+// Note: Currently only self_hedging strategy WASM is available
+const SELF_HEDGING_WASM: &[u8] = include_bytes!("../../../target/wasm32-unknown-unknown/release/strategy_self_hedging.wasm");
+
+// Other strategy files don't exist yet, using mock data (minimal valid WASM header)
+// In production, these should point to actual compiled WASM files
+const MOCK_WASM_HEADER: &[u8] = &[0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00]; // Minimal WASM header
 
 use strategy_common::types::{
-    DeploymentRecord, DeploymentRequest, DeploymentResult, DeploymentStatus,
+    DeploymentRecord, DeploymentRequest, DeploymentStatus,
     DCAConfig, ValueAvgConfig, FixedBalanceConfig, LimitOrderConfig, SelfHedgingConfig,
     StrategyMetadata, StrategyStatus, StrategyType, TradingPair, TokenMetadata,
     StrategyConfig,
 };
 
 use crate::state::{
-    generate_deployment_id, get_fee, get_wasm_module, store_deployment_record,
+    generate_deployment_id, get_fee, store_deployment_record,
     update_deployment_status, store_strategy_metadata, get_deployment_record,
+    WasmModule,
 };
-use crate::payment::{process_balance_payment, process_balance_refund};
+use crate::payment::{process_balance_payment, process_balance_refund, PaymentError, payment_error_to_string};
+
+// Deployment error types
+#[derive(Debug)]
+pub enum DeploymentError {
+    ConfigError(String),
+    PaymentError(PaymentError),
+    ModuleNotFound(StrategyType),
+    CanisterCreationFailed(String),
+    CodeInstallationFailed(String),
+    InitializationFailed(String),
+    MetadataError(String),
+    RecordNotFound(String),
+    SystemError(String),
+}
+
+impl DeploymentError {
+    pub fn to_string(&self) -> String {
+        match self {
+            DeploymentError::ConfigError(msg) => format!("Configuration error: {}", msg),
+            DeploymentError::PaymentError(err) => format!("Payment error: {:?}", err),
+            DeploymentError::ModuleNotFound(strategy_type) => format!("{:?} strategy WASM module not found", strategy_type),
+            DeploymentError::CanisterCreationFailed(msg) => format!("Canister creation failed: {}", msg),
+            DeploymentError::CodeInstallationFailed(msg) => format!("Code installation failed: {}", msg),
+            DeploymentError::InitializationFailed(msg) => format!("Strategy initialization failed: {}", msg),
+            DeploymentError::MetadataError(msg) => format!("Metadata error: {}", msg),
+            DeploymentError::RecordNotFound(msg) => format!("Record not found: {}", msg),
+            DeploymentError::SystemError(msg) => format!("System error: {}", msg),
+        }
+    }
+}
+
+// Deployment result type alias
+#[allow(dead_code)]
+type DeploymentProcessResult<T> = Result<T, DeploymentError>;
 
 // Track deployment processing tasks
 thread_local! {
     static DEPLOYMENT_TIMERS: RefCell<HashMap<String, TimerId>> = RefCell::new(HashMap::new());
 }
 
+// Result mapping helper for deployment operations
+fn map_deployment_error<T, E: std::fmt::Display>(
+    result: Result<T, E>, 
+    error_type: fn(String) -> DeploymentError
+) -> DeploymentProcessResult<T> {
+    result.map_err(|e| error_type(e.to_string()))
+}
+
+// Helper to create a deployment record
+fn create_deployment_record<T: StrategyConfig + CandidType>(
+    deployment_id: &str,
+    strategy_type: StrategyType,
+    owner: Principal,
+    fee: u64,
+    config: &T
+) -> Result<DeploymentRecord, DeploymentError> {
+    // Serialize config
+    let config_bytes = candid::encode_one(config)
+        .map_err(|e| DeploymentError::ConfigError(format!("Failed to serialize config: {}", e)))?;
+    
+    // Create deployment record
+    let record = DeploymentRecord {
+        deployment_id: deployment_id.to_string(),
+        strategy_type,
+        owner,
+        fee_amount: fee,
+        request_time: time(),
+        status: DeploymentStatus::PaymentReceived,
+        canister_id: None,
+        config_data: ByteBuf::from(config_bytes),
+        error_message: None,
+        last_updated: time(),
+    };
+    
+    Ok(record)
+}
+
 /// Create a new deployment request with generic configuration
-pub fn create_strategy_request<T: StrategyConfig + CandidType>(
+pub async fn create_strategy_request<T: StrategyConfig + CandidType>(
     config: T
 ) -> Result<DeploymentRequest, String> {
     let owner = caller();
     let fee = get_fee();
     
     // Validate config
-    config.validate()?;
+    if let Err(e) = config.validate() {
+        return Err(DeploymentError::ConfigError(e).to_string());
+    }
     
     // Get strategy type
     let strategy_type = config.get_strategy_type();
     
-    // Ensure the strategy WASM module exists
-    if get_wasm_module(strategy_type.clone()).is_none() {
-        return Err(format!("{:?} strategy WASM module not found", strategy_type));
+    // Ensure there's an available strategy WASM module
+    let wasm = get_embedded_wasm_module(strategy_type.clone());
+    
+    // Check if WASM module is available
+    // Currently only Self-Hedging strategy has real WASM, others use mock
+    if wasm.is_none() || strategy_type != StrategyType::SelfHedging {
+        return Err(DeploymentError::ModuleNotFound(strategy_type).to_string());
     }
     
     // Process payment from user's balance
     let description = format!("Deployment fee for {:?} strategy", strategy_type);
-    process_balance_payment(owner, fee, &description)?;
+    if let Err(e) = process_balance_payment(owner, fee, &description).await {
+        return Err(DeploymentError::PaymentError(e).to_string());
+    }
     
     // Generate deployment ID
     let deployment_id = generate_deployment_id();
     
-    // Serialize config
-    let config_bytes = candid::encode_one(&config)
-        .map_err(|e| format!("Failed to serialize config: {}", e))?;
-    
     // Create and store deployment record
-    let record = DeploymentRecord {
-        deployment_id: deployment_id.clone(),
-        strategy_type: strategy_type.clone(),
-        owner,
-        fee_amount: fee,
-        request_time: time(),
-        status: DeploymentStatus::PaymentReceived, // Skip authorization phase
-        canister_id: None,
-        config_data: ByteBuf::from(config_bytes),
-        error_message: None,
-        last_updated: time(),
+    let record = match create_deployment_record(&deployment_id, strategy_type.clone(), owner, fee, &config) {
+        Ok(record) => record,
+        Err(e) => return Err(e.to_string()),
     };
     
     store_deployment_record(record);
@@ -86,7 +164,10 @@ pub fn create_strategy_request<T: StrategyConfig + CandidType>(
                 
                 // Process automatic refund for failed deployment
                 if let Some(record) = get_deployment_record(&deployment_id_clone) {
-                    let _ = process_balance_refund(record.owner, record.fee_amount, &deployment_id_clone);
+                    if let Err(refund_err) = process_balance_refund(record.owner, record.fee_amount, &deployment_id_clone).await {
+                        ic_cdk::println!("Refund failed for deployment {}: {}", 
+                            deployment_id_clone, payment_error_to_string(refund_err));
+                    }
                 }
             }
         }
@@ -104,7 +185,9 @@ pub fn create_strategy_request<T: StrategyConfig + CandidType>(
 pub async fn execute_deployment(deployment_id: &str) -> Result<DeploymentResult, String> {
     // Get deployment record
     let record = get_deployment_record(deployment_id)
-        .ok_or_else(|| format!("Deployment record not found for ID: {}", deployment_id))?;
+        .ok_or_else(|| DeploymentError::RecordNotFound(
+            format!("Deployment record not found for ID: {}", deployment_id)
+        ).to_string())?;
     
     // Create canister
     let canister_id = match create_strategy_canister().await {
@@ -115,27 +198,37 @@ pub async fn execute_deployment(deployment_id: &str) -> Result<DeploymentResult,
                 DeploymentStatus::CanisterCreated, 
                 Some(cid), 
                 None
-            )?;
+            ).map_err(|e| DeploymentError::SystemError(e).to_string())?;
             cid
         },
         Err(err) => {
             return handle_deployment_failure(
                 deployment_id,
                 None,
-                format!("Failed to create canister: {}", err)
-            );
+                DeploymentError::CanisterCreationFailed(err).to_string()
+            ).await;
         }
     };
     
-    // Get WASM module
-    let wasm_module = match get_wasm_module(record.strategy_type.clone()) {
-        Some(wasm) => wasm,
+    // Get WASM module: first try to retrieve from state, if not found use embedded module
+    let wasm_module = match get_embedded_wasm_module(record.strategy_type.clone()) {
+        Some(wasm) => {
+            // Only Self-Hedging strategy has real WASM implementation
+            if record.strategy_type != StrategyType::SelfHedging {
+                return handle_deployment_failure(
+                    deployment_id,
+                    Some(canister_id),
+                    DeploymentError::ModuleNotFound(record.strategy_type).to_string()
+                ).await;
+            }
+            wasm
+        },
         None => {
             return handle_deployment_failure(
                 deployment_id,
                 Some(canister_id),
-                format!("WASM module not found for strategy type: {:?}", record.strategy_type)
-            );
+                DeploymentError::ModuleNotFound(record.strategy_type).to_string()
+            ).await;
         }
     };
     
@@ -144,8 +237,8 @@ pub async fn execute_deployment(deployment_id: &str) -> Result<DeploymentResult,
         return handle_deployment_failure(
             deployment_id,
             Some(canister_id),
-            format!("Failed to install code: {}", err)
-        );
+            DeploymentError::CodeInstallationFailed(err).to_string()
+        ).await;
     }
     
     // Update status
@@ -154,7 +247,7 @@ pub async fn execute_deployment(deployment_id: &str) -> Result<DeploymentResult,
         DeploymentStatus::CodeInstalled, 
         Some(canister_id), 
         None
-    )?;
+    ).map_err(|e| DeploymentError::SystemError(e).to_string())?;
     
     // Initialize strategy using common function
     if let Err(err) = initialize_strategy(
@@ -166,8 +259,8 @@ pub async fn execute_deployment(deployment_id: &str) -> Result<DeploymentResult,
         return handle_deployment_failure(
             deployment_id,
             Some(canister_id),
-            format!("Failed to initialize strategy: {}", err)
-        );
+            DeploymentError::InitializationFailed(err).to_string()
+        ).await;
     }
     
     // Update status to initialized
@@ -176,7 +269,7 @@ pub async fn execute_deployment(deployment_id: &str) -> Result<DeploymentResult,
         DeploymentStatus::Initialized, 
         Some(canister_id), 
         None
-    )?;
+    ).map_err(|e| DeploymentError::SystemError(e).to_string())?;
     
     // Create strategy metadata
     let metadata = match create_strategy_metadata(&record, canister_id) {
@@ -185,8 +278,8 @@ pub async fn execute_deployment(deployment_id: &str) -> Result<DeploymentResult,
             return handle_deployment_failure(
                 deployment_id,
                 Some(canister_id),
-                format!("Failed to create strategy metadata: {}", err)
-            );
+                DeploymentError::MetadataError(err).to_string()
+            ).await;
         }
     };
     
@@ -199,50 +292,38 @@ pub async fn execute_deployment(deployment_id: &str) -> Result<DeploymentResult,
         DeploymentStatus::Deployed, 
         Some(canister_id), 
         None
-    )?;
+    ).map_err(|e| DeploymentError::SystemError(e).to_string())?;
     
+    // Return successful result
     Ok(DeploymentResult::Success(canister_id))
 }
 
 /// Handle failed deployment and process refund
-fn handle_deployment_failure(
+async fn handle_deployment_failure(
     deployment_id: &str,
     canister_id: Option<Principal>,
     error_message: String
 ) -> Result<DeploymentResult, String> {
-    // Update status to failed
-    if let Err(e) = update_deployment_status(
-        deployment_id, 
-        DeploymentStatus::DeploymentFailed, 
-        canister_id, 
+    // Update deployment status to failed
+    update_deployment_status(
+        deployment_id,
+        DeploymentStatus::DeploymentFailed,
+        canister_id,
         Some(error_message.clone())
-    ) {
-        ic_cdk::println!("Failed to update deployment status: {}", e);
+    ).map_err(|e| format!("Failed to update deployment status: {}", e))?;
+    
+    // Get deployment record for refund
+    let record = get_deployment_record(deployment_id)
+        .ok_or_else(|| format!("Deployment record not found for ID: {}", deployment_id))?;
+    
+    // Process refund
+    if let Err(e) = process_balance_refund(record.owner, record.fee_amount, deployment_id).await {
+        ic_cdk::println!("Failed to process refund for deployment {}: {}", deployment_id, e);
+        // Continue with failure result even if refund fails
     }
     
-    // Process refund asynchronously
-    let deployment_id_clone = deployment_id.to_string();
-    ic_cdk::spawn(async move {
-        if let Some(record) = get_deployment_record(&deployment_id_clone) {
-            match process_balance_refund(record.owner, record.fee_amount, &deployment_id_clone) {
-                Ok(_) => {
-                    // Update status to refunded
-                    let _ = update_deployment_status(
-                        &deployment_id_clone,
-                        DeploymentStatus::Refunded,
-                        None,
-                        None
-                    );
-                    ic_cdk::println!("Refund processed for failed deployment: {}", deployment_id_clone);
-                },
-                Err(e) => {
-                    ic_cdk::println!("Failed to process refund: {}: {}", deployment_id_clone, e);
-                }
-            }
-        }
-    });
-    
-    Err(error_message)
+    // Return failure result
+    Ok(DeploymentResult::Failure(error_message))
 }
 
 /// Generic function to initialize a strategy based on its type
@@ -489,4 +570,32 @@ async fn install_strategy_code(
         Ok(()) => Ok(()),
         Err((code, msg)) => Err(format!("Error code: {:?}, message: {}", code, msg)),
     }
-} 
+}
+
+// Simplified deployment result type
+#[derive(CandidType, Clone, Debug)]
+pub enum DeploymentResult {
+    Success(Principal),
+    Failure(String),
+}
+
+// Get WASM module directly from embedded constants
+pub fn get_embedded_wasm_module(strategy_type: StrategyType) -> Option<Vec<u8>> {
+    match strategy_type {
+        StrategyType::SelfHedging => Some(SELF_HEDGING_WASM.to_vec()),
+        // Other strategies use mock data until implemented
+        StrategyType::DollarCostAveraging => Some(MOCK_WASM_HEADER.to_vec()),
+        StrategyType::ValueAveraging => Some(MOCK_WASM_HEADER.to_vec()),
+        StrategyType::FixedBalance => Some(MOCK_WASM_HEADER.to_vec()),
+        StrategyType::LimitOrder => Some(MOCK_WASM_HEADER.to_vec()),
+        _ => None,
+    }
+}
+
+// Initialize all strategy WASM modules - no longer needed as we use embedded modules only
+pub fn initialize_wasm_modules() -> Result<(), String> {
+    // This function is now a no-op since we directly use embedded WASM modules
+    // Keeping it for API compatibility
+    ic_cdk::println!("Using embedded WASM modules");
+    Ok(())
+}

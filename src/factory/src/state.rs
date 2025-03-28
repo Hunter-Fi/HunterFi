@@ -13,6 +13,8 @@ use strategy_common::types::{
 use serde::{Deserialize, Serialize};
 use candid::CandidType;
 use hex;
+use std::marker::PhantomData;
+use bincode;
 
 // ICP Ledger canister ID
 pub const ICP_LEDGER_CANISTER_ID: &str = "ryjl3-tyaaa-aaaaa-aaaba-cai";
@@ -27,7 +29,7 @@ pub const MAX_COMPLETED_RECORDS: usize = 10000;
 pub const ARCHIVING_THRESHOLD_PERCENT: u8 = 80;
 
 // User account system for recharge-based payment model
-#[derive(CandidType, Deserialize, Clone, Debug)]
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct UserAccount {
     pub owner: Principal,
     pub balance: u64,        // User balance in e8s
@@ -37,16 +39,18 @@ pub struct UserAccount {
 }
 
 // Transaction types for tracking financial operations
-#[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TransactionType {
     Deposit,
     DeploymentFee,
     Refund,
     AdminAdjustment,
+    Withdrawal,
+    Transfer,
 }
 
 // Transaction record for financial history
-#[derive(CandidType, Deserialize, Clone, Debug)]
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TransactionRecord {
     pub transaction_id: String,
     pub user: Principal,
@@ -59,139 +63,56 @@ pub struct TransactionRecord {
 // Memory manager and stable storage
 type Memory = VirtualMemory<DefaultMemoryImpl>;
 
-// Helper types for stable storage with Ord implementation
+// Generic Bytes wrapper for any type that can be serialized
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct StrategyTypeBytes(pub Vec<u8>);
+pub struct GenericBytes<T: Serialize + for<'de> Deserialize<'de> + Ord> {
+    pub data: Vec<u8>,
+    _marker: PhantomData<T>,
+}
 
-impl Storable for StrategyTypeBytes {
-    const BOUND: Bound = Bound::Unbounded;
-
-    fn to_bytes(&self) -> Cow<[u8]> {
-        Cow::Borrowed(&self.0)
+impl<T: Serialize + for<'de> Deserialize<'de> + Ord> GenericBytes<T> {
+    pub fn new(value: &T) -> Self {
+        let bytes = bincode::serialize(value).unwrap_or_default();
+        Self {
+            data: bytes,
+            _marker: PhantomData,
+        }
     }
 
-    fn from_bytes(bytes: Cow<[u8]>) -> Self {
-        Self(bytes.to_vec())
+    pub fn into_inner(&self) -> Option<T> {
+        bincode::deserialize(&self.data).ok()
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct WasmModuleBytes(pub Vec<u8>);
-
-impl Storable for WasmModuleBytes {
+impl<T: Serialize + for<'de> Deserialize<'de> + Ord> Storable for GenericBytes<T> {
     const BOUND: Bound = Bound::Unbounded;
 
     fn to_bytes(&self) -> Cow<[u8]> {
-        Cow::Borrowed(&self.0)
+        Cow::Borrowed(&self.data)
     }
 
     fn from_bytes(bytes: Cow<[u8]>) -> Self {
-        Self(bytes.to_vec())
+        Self {
+            data: bytes.to_vec(),
+            _marker: PhantomData,
+        }
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct PrincipalBytes(pub Vec<u8>);
-
-impl Storable for PrincipalBytes {
-    const BOUND: Bound = Bound::Unbounded;
-
-    fn to_bytes(&self) -> Cow<[u8]> {
-        Cow::Borrowed(&self.0)
-    }
-
-    fn from_bytes(bytes: Cow<[u8]>) -> Self {
-        Self(bytes.to_vec())
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct StrategyMetadataBytes(pub Vec<u8>);
-
-impl Storable for StrategyMetadataBytes {
-    const BOUND: Bound = Bound::Unbounded;
-
-    fn to_bytes(&self) -> Cow<[u8]> {
-        Cow::Borrowed(&self.0)
-    }
-
-    fn from_bytes(bytes: Cow<[u8]>) -> Self {
-        Self(bytes.to_vec())
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct DeploymentIdBytes(pub Vec<u8>);
-
-impl Storable for DeploymentIdBytes {
-    const BOUND: Bound = Bound::Unbounded;
-
-    fn to_bytes(&self) -> Cow<[u8]> {
-        Cow::Borrowed(&self.0)
-    }
-
-    fn from_bytes(bytes: Cow<[u8]>) -> Self {
-        Self(bytes.to_vec())
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct DeploymentRecordBytes(pub Vec<u8>);
-
-impl Storable for DeploymentRecordBytes {
-    const BOUND: Bound = Bound::Unbounded;
-
-    fn to_bytes(&self) -> Cow<[u8]> {
-        Cow::Borrowed(&self.0)
-    }
-
-    fn from_bytes(bytes: Cow<[u8]>) -> Self {
-        Self(bytes.to_vec())
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct TransactionRecordBytes(pub Vec<u8>);
-
-impl Storable for TransactionRecordBytes {
-    const BOUND: Bound = Bound::Unbounded;
-
-    fn to_bytes(&self) -> Cow<[u8]> {
-        Cow::Borrowed(&self.0)
-    }
-
-    fn from_bytes(bytes: Cow<[u8]>) -> Self {
-        Self(bytes.to_vec())
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct UserAccountBytes(pub Vec<u8>);
-
-impl Storable for UserAccountBytes {
-    const BOUND: Bound = Bound::Unbounded;
-
-    fn to_bytes(&self) -> Cow<[u8]> {
-        Cow::Borrowed(&self.0)
-    }
-
-    fn from_bytes(bytes: Cow<[u8]>) -> Self {
-        Self(bytes.to_vec())
-    }
-}
+// Type aliases for common types
+pub type StrategyTypeBytes = GenericBytes<StrategyType>;
+pub type PrincipalBytes = GenericBytes<Principal>;
+pub type StrategyMetadataBytes = GenericBytes<StrategyMetadata>;
+pub type DeploymentIdBytes = GenericBytes<String>;
+pub type DeploymentRecordBytes = GenericBytes<DeploymentRecord>;
+pub type TransactionRecordBytes = GenericBytes<TransactionRecord>;
+pub type UserAccountBytes = GenericBytes<UserAccount>;
 
 // Global state
 thread_local! {
     // Memory manager for stable storage
     pub static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> = RefCell::new(
         MemoryManager::init(DefaultMemoryImpl::default())
-    );
-
-    // Map to store WASM modules by strategy type
-    pub static WASM_MODULES: RefCell<StableBTreeMap<StrategyTypeBytes, WasmModuleBytes, Memory>> = RefCell::new(
-        StableBTreeMap::init(
-            MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(0)))
-        )
     );
 
     // Map to store strategy metadata by canister ID
@@ -261,30 +182,47 @@ pub fn generate_deployment_id() -> String {
     format!("{}-{}-{}", timestamp, caller, counter)
 }
 
-// Store deployment record
+// Generic function to store data in a StableBTreeMap
+fn store_in_map<K, V, M>(
+    map: &RefCell<StableBTreeMap<GenericBytes<K>, GenericBytes<V>, M>>,
+    key: &K,
+    value: &V,
+) where
+    K: Serialize + for<'de> Deserialize<'de> + Clone + Ord,
+    V: Serialize + for<'de> Deserialize<'de> + Clone + Ord,
+    M: ic_stable_structures::Memory,
+{
+    map.borrow_mut().insert(
+        GenericBytes::new(key),
+        GenericBytes::new(value),
+    );
+}
+
+// Generic function to get data from a StableBTreeMap
+fn get_from_map<K, V, M>(
+    map: &RefCell<StableBTreeMap<GenericBytes<K>, GenericBytes<V>, M>>,
+    key: &K,
+) -> Option<V> where
+    K: Serialize + for<'de> Deserialize<'de> + Clone + Ord,
+    V: Serialize + for<'de> Deserialize<'de> + Clone + Ord,
+    M: ic_stable_structures::Memory,
+{
+    map.borrow()
+        .get(&GenericBytes::new(key))
+        .and_then(|bytes| bytes.into_inner())
+}
+
+// Store deployment record using the generic function
 pub fn store_deployment_record(record: DeploymentRecord) {
-    let record_bytes = candid::encode_one(&record)
-        .expect("Failed to encode deployment record");
-    let id_bytes = record.deployment_id.as_bytes().to_vec();
-    
     DEPLOYMENT_RECORDS.with(|records| {
-        records.borrow_mut().insert(
-            DeploymentIdBytes(id_bytes),
-            DeploymentRecordBytes(record_bytes),
-        );
+        store_in_map(records, &record.deployment_id.clone(), &record);
     });
 }
 
-// Get deployment record
+// Get deployment record using the generic function
 pub fn get_deployment_record(deployment_id: &str) -> Option<DeploymentRecord> {
-    let id_bytes = deployment_id.as_bytes().to_vec();
-    
     DEPLOYMENT_RECORDS.with(|records| {
-        records.borrow()
-            .get(&DeploymentIdBytes(id_bytes))
-            .and_then(|record_bytes| {
-                candid::decode_one::<DeploymentRecord>(&record_bytes.0).ok()
-            })
+        get_from_map(records, &deployment_id.to_string())
     })
 }
 
@@ -314,42 +252,26 @@ pub fn update_deployment_status(
     }
 }
 
-// Store strategy metadata
+// Store strategy metadata with optimized code
 pub fn store_strategy_metadata(metadata: StrategyMetadata) {
-    // Serialize metadata
-    let metadata_bytes = candid::encode_one(&metadata)
-        .expect("Failed to encode strategy metadata");
-    let principal_bytes = metadata.canister_id.as_slice().to_vec();
-    
-    // Store in stable storage
+    // Store in stable storage using generic function
     STRATEGIES.with(|s| {
-        s.borrow_mut().insert(
-            PrincipalBytes(principal_bytes),
-            StrategyMetadataBytes(metadata_bytes),
-        );
+        store_in_map(s, &metadata.canister_id, &metadata);
     });
     
     // Update owner to strategies mapping
     OWNER_STRATEGIES.with(|owner_strategies| {
         let mut map = owner_strategies.borrow_mut();
-        if let Some(strategies) = map.get_mut(&metadata.owner) {
-            strategies.push(metadata.canister_id);
-        } else {
-            map.insert(metadata.owner, vec![metadata.canister_id]);
-        }
+        map.entry(metadata.owner)
+           .or_insert_with(Vec::new)
+           .push(metadata.canister_id);
     });
 }
 
-// Get strategy metadata
+// Get strategy metadata using the generic function
 pub fn get_strategy_metadata(canister_id: Principal) -> Option<StrategyMetadata> {
-    let principal_bytes = canister_id.as_slice().to_vec();
-    
     STRATEGIES.with(|s| {
-        s.borrow()
-            .get(&PrincipalBytes(principal_bytes))
-            .and_then(|metadata_bytes| {
-                candid::decode_one::<StrategyMetadata>(&metadata_bytes.0).ok()
-            })
+        get_from_map(s, &canister_id)
     })
 }
 
@@ -378,40 +300,13 @@ pub fn set_fee(fee: u64) -> Result<(), String> {
     Ok(())
 }
 
-// Store WASM module
-pub fn store_wasm_module(wasm_module: WasmModule) -> Result<(), String> {
-    let strategy_type_bytes = candid::encode_one(&wasm_module.strategy_type)
-        .map_err(|e| format!("Failed to encode strategy type: {}", e))?;
-    
-    WASM_MODULES.with(|modules| {
-        modules.borrow_mut().insert(
-            StrategyTypeBytes(strategy_type_bytes),
-            WasmModuleBytes(wasm_module.wasm_module),
-        );
-    });
-    
-    Ok(())
-}
-
-// Get WASM module
-pub fn get_wasm_module(strategy_type: StrategyType) -> Option<Vec<u8>> {
-    let strategy_type_bytes = candid::encode_one(&strategy_type).unwrap();
-    
-    WASM_MODULES.with(|modules| {
-        modules
-            .borrow()
-            .get(&StrategyTypeBytes(strategy_type_bytes))
-            .map(|module_bytes| module_bytes.0)
-    })
-}
-
 // Get all deployment records
 pub fn get_all_deployment_records() -> Vec<DeploymentRecord> {
     let mut records = Vec::new();
     
     DEPLOYMENT_RECORDS.with(|recs| {
         for (_, record_bytes) in recs.borrow().iter() {
-            if let Ok(record) = candid::decode_one::<DeploymentRecord>(&record_bytes.0) {
+            if let Some(record) = record_bytes.into_inner() {
                 records.push(record);
             }
         }
@@ -479,7 +374,7 @@ pub fn archive_old_deployment_records() -> Result<usize, String> {
         // Remove from main storage
         DEPLOYMENT_RECORDS.with(|records| {
             let mut records = records.borrow_mut();
-            let key = DeploymentIdBytes(deployment_id.as_bytes().to_vec());
+            let key = DeploymentIdBytes::new(&deployment_id);
             if records.remove(&key).is_some() {
                 archived_count += 1;
             }
@@ -501,7 +396,7 @@ pub fn get_memory_usage_percent() -> u8 {
     let estimated_memory_usage = total_records * 500;
     
     // Assuming 4GB stable memory maximum
-    let max_memory = 4 * 1024 * 1024 * 1024;
+    let max_memory = 4 * 1024 * 1024;
     
     // Calculate percentage
     let percentage = (estimated_memory_usage as f64 / max_memory as f64 * 100.0) as u8;
@@ -546,124 +441,79 @@ pub fn restore_upgrade_data(data: UpgradeData) {
 }
 
 // Generate a unique transaction ID
-pub fn generate_transaction_id() -> String {
-    // Use async/await properly with raw_rand
+pub async fn generate_transaction_id() -> String {
     let timestamp = ic_cdk::api::time();
+    let caller = ic_cdk::api::caller().to_text();
+    let id = ic_cdk::api::id();
+    let random_bytes = id.as_slice();
+    let random_hex = hex::encode(random_bytes);
     
-    // Generate a pseudo-random string for the transaction ID
-    // Instead of using raw_rand (which requires async), we'll use timestamp + counter
-    let random_part = DEPLOYMENT_ID_COUNTER.with(|counter| {
-        let value = counter.get();
-        counter.set(value.wrapping_add(1));
-        value
-    });
-    
-    format!("txn-{}-{:x}", timestamp, random_part)
+    format!("{}-{}-{}", timestamp, caller, random_hex)
 }
 
-// Store user account
+// Store user account using the generic function
 pub fn store_user_account(account: UserAccount) {
-    let account_bytes = candid::encode_one(&account)
-        .expect("Failed to encode user account");
-    let principal_bytes = account.owner.as_slice().to_vec();
-    
     USER_ACCOUNTS.with(|accounts| {
-        accounts.borrow_mut().insert(
-            PrincipalBytes(principal_bytes),
-            UserAccountBytes(account_bytes),
-        );
+        store_in_map(accounts, &account.owner, &account);
     });
 }
 
-// Get user account
-pub fn get_user_account(user: Principal) -> Option<UserAccount> {
-    let principal_bytes = user.as_slice().to_vec();
-    
+// Get user account using the generic function
+pub fn get_user_account(user: Principal) -> UserAccount {
     USER_ACCOUNTS.with(|accounts| {
-        accounts.borrow()
-            .get(&PrincipalBytes(principal_bytes))
-            .and_then(|account_bytes| {
-                candid::decode_one::<UserAccount>(&account_bytes.0).ok()
-            })
+        get_from_map(accounts, &user).unwrap_or_else(|| UserAccount {
+            owner: user,
+            balance: 0,
+            last_deposit: 0,
+            total_deposited: 0,
+            total_consumed: 0,
+        })
     })
 }
 
-// Store transaction record - with cache size management
+// Store transaction record using the generic function
 pub fn store_transaction_record(record: TransactionRecord) {
-    let record_bytes = candid::encode_one(&record)
-        .expect("Failed to encode transaction record");
-    let id_bytes = record.transaction_id.as_bytes().to_vec();
-    
     TRANSACTIONS.with(|transactions| {
-        transactions.borrow_mut().insert(
-            DeploymentIdBytes(id_bytes),
-            TransactionRecordBytes(record_bytes),
-        );
+        store_in_map(transactions, &record.transaction_id.clone(), &record);
     });
     
-    // Also add to the in-memory cache for faster access, with size management
+    // Maintain in-memory cache for fast access
     TRANSACTION_CACHE.with(|cache| {
-        let max_size = MAX_CACHE_SIZE.with(|ms| ms.get());
-        let mut cache_ref = cache.borrow_mut();
+        let mut cache = cache.borrow_mut();
+        cache.push(record.clone());
         
-        // Add to cache
-        cache_ref.push(record);
-        
-        // Trim cache if too large
-        if cache_ref.len() > max_size {
-            // Only keep the most recent 80% of the maximum size
-            let trim_size = (max_size as f64 * 0.8) as usize;
-            let start_index = cache_ref.len() - trim_size;
-            *cache_ref = cache_ref.split_off(start_index);
+        // Limit cache size
+        let max_size = MAX_CACHE_SIZE.with(|max| max.get());
+        if cache.len() > max_size {
+            cache.remove(0); // Remove oldest
         }
     });
 }
 
 // Get all transaction records
 pub fn get_all_transaction_records() -> Vec<TransactionRecord> {
-    let mut records = Vec::new();
-    
-    TRANSACTIONS.with(|txns| {
-        for (_, record_bytes) in txns.borrow().iter() {
-            if let Ok(record) = candid::decode_one::<TransactionRecord>(&record_bytes.0) {
-                records.push(record);
-            }
-        }
-    });
-    
-    records
+    TRANSACTION_CACHE.with(|cache| cache.borrow().clone())
 }
 
 // Get transaction records for a user
 pub fn get_user_transaction_records(user: Principal) -> Vec<TransactionRecord> {
-    // First try to get from cache for better performance
-    let from_cache = TRANSACTION_CACHE.with(|cache| {
+    TRANSACTION_CACHE.with(|cache| {
         cache.borrow()
             .iter()
             .filter(|record| record.user == user)
             .cloned()
-            .collect::<Vec<_>>()
-    });
-    
-    if !from_cache.is_empty() {
-        return from_cache;
-    }
-    
-    // Fall back to stable storage if cache is empty
-    get_all_transaction_records()
-        .into_iter()
-        .filter(|record| record.user == user)
-        .collect()
+            .collect()
+    })
 }
 
-// Record a new transaction
-pub fn record_transaction(
-    user: Principal, 
-    amount: u64, 
-    transaction_type: TransactionType, 
-    description: String
+// Record a transaction
+pub async fn record_transaction(
+    user: Principal,
+    amount: u64,
+    transaction_type: TransactionType,
+    description: String,
 ) -> String {
-    let transaction_id = generate_transaction_id();
+    let transaction_id = generate_transaction_id().await;
     
     let record = TransactionRecord {
         transaction_id: transaction_id.clone(),
@@ -674,20 +524,14 @@ pub fn record_transaction(
         description,
     };
     
-    store_transaction_record(record);
+    store_transaction_record(record.clone());
     
     transaction_id
 }
 
 // Update user balance
 pub fn update_user_balance(user: Principal, amount: u64, is_deposit: bool) -> Result<u64, String> {
-    let mut account = get_user_account(user).unwrap_or(UserAccount {
-        owner: user,
-        balance: 0,
-        last_deposit: 0,
-        total_deposited: 0,
-        total_consumed: 0,
-    });
+    let mut account = get_user_account(user);
     
     if is_deposit {
         account.balance = account.balance.saturating_add(amount);
@@ -712,10 +556,7 @@ pub fn update_user_balance(user: Principal, amount: u64, is_deposit: bool) -> Re
 
 // Check if user has sufficient balance
 pub fn check_user_balance(user: Principal, amount: u64) -> Result<bool, String> {
-    match get_user_account(user) {
-        Some(account) => Ok(account.balance >= amount),
-        None => Ok(false), // New users have zero balance
-    }
+    Ok(get_user_account(user).balance >= amount)
 }
 
 // Pre-upgrade and post-upgrade functions
@@ -747,4 +588,204 @@ pub fn post_upgrade() {
         }
         Err(e) => ic_cdk::trap(&format!("Failed to restore stable data: {}", e)),
     }
+}
+
+pub async fn process_balance_refund(user: Principal, amount: u64, deployment_id: &str) -> Result<(), String> {
+    // Verify refund amount is valid
+    if amount == 0 {
+        return Err("Refund amount must be greater than 0".to_string());
+    }
+    
+    // Add to user balance
+    update_user_balance(user, amount, true)
+        .map_err(|e| format!("Failed to update user balance: {}", e))?;
+    
+    // Record transaction
+    let description = format!("Refund for failed deployment (ID: {})", deployment_id);
+    record_transaction(
+        user,
+        amount,
+        TransactionType::Refund,
+        description
+    ).await;
+    
+    ic_cdk::println!("Successfully processed refund of {} e8s for user {}, deployment ID: {}", amount, user.to_text(), deployment_id);
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub async fn process_deposit(user: Principal, amount: u64) -> Result<u64, String> {
+    // Verify amount is valid
+    if amount == 0 {
+        return Err("Deposit amount must be greater than 0".to_string());
+    }
+    
+    // Add to user balance
+    let new_balance = update_user_balance(user, amount, true)
+        .map_err(|e| format!("Failed to update user balance: {}", e))?;
+    
+    // Record transaction
+    let description = format!("Deposit of {:.8} ICP", amount as f64 / 100_000_000.0);
+    record_transaction(
+        user,
+        amount,
+        TransactionType::Deposit,
+        description
+    ).await;
+    
+    Ok(new_balance)
+}
+
+#[allow(dead_code)]
+pub async fn process_withdrawal(user: Principal, amount: u64) -> Result<u64, String> {
+    // Verify amount is valid
+    if amount == 0 {
+        return Err("Withdrawal amount must be greater than 0".to_string());
+    }
+    
+    // Check if user has sufficient balance
+    if !check_user_balance(user, amount)
+        .map_err(|e| format!("Failed to check user balance: {}", e))? 
+    {
+        return Err("Insufficient balance".to_string());
+    }
+    
+    // Deduct from user balance
+    let new_balance = update_user_balance(user, amount, false)
+        .map_err(|e| format!("Failed to update user balance: {}", e))?;
+    
+    // Record transaction
+    let description = format!("Withdrawal of {:.8} ICP", amount as f64 / 100_000_000.0);
+    record_transaction(
+        user,
+        amount,
+        TransactionType::Withdrawal,
+        description
+    ).await;
+    
+    Ok(new_balance)
+}
+
+#[allow(dead_code)]
+pub async fn process_deployment_fee(user: Principal, amount: u64, deployment_id: &str) -> Result<(), String> {
+    // Verify amount is valid
+    if amount == 0 {
+        return Err("Deployment fee must be greater than 0".to_string());
+    }
+    
+    // Check if user has sufficient balance
+    if !check_user_balance(user, amount)
+        .map_err(|e| format!("Failed to check user balance: {}", e))? 
+    {
+        return Err("Insufficient balance for deployment fee".to_string());
+    }
+    
+    // Deduct from user balance
+    update_user_balance(user, amount, false)
+        .map_err(|e| format!("Failed to update user balance: {}", e))?;
+    
+    // Record transaction
+    let description = format!("Deployment fee for deployment (ID: {})", deployment_id);
+    record_transaction(
+        user,
+        amount,
+        TransactionType::DeploymentFee,
+        description
+    ).await;
+    
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub async fn process_admin_adjustment(user: Principal, amount: u64, reason: String) -> Result<(), String> {
+    // Verify amount is valid
+    if amount == 0 {
+        return Err("Adjustment amount must be greater than 0".to_string());
+    }
+    
+    // Add to user balance
+    update_user_balance(user, amount, true)
+        .map_err(|e| format!("Failed to update user balance: {}", e))?;
+    
+    // Record transaction
+    record_transaction(
+        user,
+        amount,
+        TransactionType::AdminAdjustment,
+        reason
+    ).await;
+    
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub async fn process_balance_payment(user: Principal, amount: u64, purpose: &str) -> Result<(), String> {
+    // Verify amount is valid
+    if amount == 0 {
+        return Err("Payment amount must be greater than 0".to_string());
+    }
+    
+    // Check if user has sufficient balance
+    if !check_user_balance(user, amount)
+        .map_err(|e| format!("Failed to check user balance: {}", e))? 
+    {
+        return Err("Insufficient balance".to_string());
+    }
+    
+    // Deduct from user balance
+    update_user_balance(user, amount, false)
+        .map_err(|e| format!("Failed to update user balance: {}", e))?;
+    
+    // Record transaction
+    record_transaction(
+        user,
+        amount,
+        TransactionType::DeploymentFee,
+        purpose.to_string()
+    ).await;
+    
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub async fn process_balance_transfer(from: Principal, to: Principal, amount: u64, purpose: &str) -> Result<(), String> {
+    // Verify amount is valid
+    if amount == 0 {
+        return Err("Transfer amount must be greater than 0".to_string());
+    }
+    
+    // Check if sender has sufficient balance
+    if !check_user_balance(from, amount)
+        .map_err(|e| format!("Failed to check sender balance: {}", e))? 
+    {
+        return Err("Insufficient balance".to_string());
+    }
+    
+    // Deduct from sender balance
+    update_user_balance(from, amount, false)
+        .map_err(|e| format!("Failed to update sender balance: {}", e))?;
+    
+    // Add to recipient balance
+    update_user_balance(to, amount, true)
+        .map_err(|e| format!("Failed to update recipient balance: {}", e))?;
+    
+    // Record transaction for sender
+    let sender_description = format!("Transfer to {}: {}", to.to_text(), purpose);
+    record_transaction(
+        from,
+        amount,
+        TransactionType::Transfer,
+        sender_description
+    ).await;
+    
+    // Record transaction for recipient
+    let recipient_description = format!("Transfer from {}: {}", from.to_text(), purpose);
+    record_transaction(
+        to,
+        amount,
+        TransactionType::Transfer,
+        recipient_description
+    ).await;
+    
+    Ok(())
 } 

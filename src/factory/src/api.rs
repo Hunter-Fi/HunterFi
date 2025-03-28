@@ -2,22 +2,24 @@ use candid::Principal;
 use ic_cdk::api::caller;
 use ic_cdk_macros::{init, post_upgrade, pre_upgrade, query, update};
 use strategy_common::types::{
-    DCAConfig, DeploymentRecord, DeploymentRequest, DeploymentResult,
-    DeploymentStatus, FixedBalanceConfig, LimitOrderConfig, SelfHedgingConfig,
+    DCAConfig, DeploymentRecord, DeploymentRequest,
+    FixedBalanceConfig, LimitOrderConfig, SelfHedgingConfig,
     StrategyMetadata, StrategyType, ValueAvgConfig,
 };
-use crate::payment::{process_deposit, withdraw_funds, user_withdraw_funds};
+use crate::payment::{
+    process_deposit, withdraw_funds, user_withdraw_funds, 
+    payment_error_to_string
+};
 use crate::state::{
     get_all_deployment_records, get_deployment_records_by_owner, get_strategy_metadata,
-    get_wasm_module, is_admin, require_admin, set_fee, store_wasm_module, WasmModule,
+    is_admin, require_admin, set_fee,
     get_deployment_record, get_user_account, get_user_transaction_records, 
     update_user_balance, record_transaction, TransactionType, get_fee, 
     pre_upgrade as state_pre_upgrade, post_upgrade as state_post_upgrade,
-    UserAccount, TransactionRecord,
+    UserAccount, TransactionRecord, WasmModule,
 };
 use crate::deployment_manager;
 use crate::timer;
-use candid::CandidType;
 
 // Maximum transaction limit for queries to prevent DoS
 const MAX_TRANSACTION_QUERY_LIMIT: usize = 100;
@@ -30,6 +32,9 @@ fn init() {
     crate::state::ADMINS.with(|admins| {
         admins.borrow_mut().insert(initial_admin);
     });
+    
+    // Using embedded WASM modules directly, no initialization needed
+    ic_cdk::println!("Factory canister initialized with embedded WASM modules");
     
     // Schedule timers
     timer::schedule_timers();
@@ -49,6 +54,9 @@ fn pre_upgrade() {
 fn post_upgrade() {
     // Restore state
     state_post_upgrade();
+    
+    // Using embedded WASM modules directly, no reinitialization needed
+    ic_cdk::println!("Factory canister upgraded with embedded WASM modules");
     
     // Restart timers
     timer::schedule_timers();
@@ -74,34 +82,26 @@ fn add_admin(principal: Principal) -> Result<(), String> {
 fn remove_admin(principal: Principal) -> Result<(), String> {
     require_admin()?;
     
-    let mut is_last_admin = false;
-    
-    crate::state::ADMINS.with(|admins| {
-        let mut admins = admins.borrow_mut();
-        
-        // Prevent removing the last admin
-        if admins.len() <= 1 && admins.contains(&principal) {
-            is_last_admin = true;
-            return;
-        }
-        
-        admins.remove(&principal);
+    // Check if attempting to remove the last admin
+    let is_last_admin = crate::state::ADMINS.with(|admins| {
+        let admins_ref = admins.borrow();
+        admins_ref.len() <= 1 && admins_ref.contains(&principal)
     });
     
     if is_last_admin {
-        Err("Cannot remove the last admin".to_string())
-    } else {
-        Ok(())
+        return Err("Cannot remove the last admin".to_string());
     }
+    
+    // If not the last admin, proceed with removal
+    crate::state::ADMINS.with(|admins| {
+        admins.borrow_mut().remove(&principal);
+    });
+    
+    Ok(())
 }
 
 #[query]
 fn get_admins() -> Vec<Principal> {
-    // 只有管理员可以查询管理员列表
-    if !is_admin() {
-        return Vec::new();
-    }
-    
     crate::state::ADMINS.with(|admins| {
         admins.borrow().iter().cloned().collect()
     })
@@ -113,21 +113,7 @@ fn is_caller_admin() -> bool {
 }
 
 // WASM module management
-#[update]
-fn install_strategy_wasm(module: WasmModule) -> Result<(), String> {
-    require_admin()?;
-    
-    // Verify module is valid
-    if module.wasm_module.is_empty() {
-        return Err("WASM module cannot be empty".to_string());
-    }
-    
-    // Store module
-    store_wasm_module(module.clone())?;
-    
-    Ok(())
-}
-
+// WASM query - now returns embedded WASM directly
 #[query]
 fn get_strategy_wasm(strategy_type: StrategyType) -> Option<Vec<u8>> {
     // Only admins can retrieve WASM modules
@@ -135,14 +121,14 @@ fn get_strategy_wasm(strategy_type: StrategyType) -> Option<Vec<u8>> {
         return None;
     }
     
-    get_wasm_module(strategy_type)
+    deployment_manager::get_embedded_wasm_module(strategy_type)
 }
 
 // Deployment fee management
 #[update]
 fn set_deployment_fee(fee_e8s: u64) -> Result<(), String> {
     require_admin()?;
-    set_fee(fee_e8s);
+    let _ = set_fee(fee_e8s);
     Ok(())
 }
 
@@ -177,7 +163,7 @@ fn get_all_strategies() -> Vec<StrategyMetadata> {
     crate::state::STRATEGIES.with(|s| {
         s.borrow().iter()
             .filter_map(|(_, metadata_bytes)| {
-                candid::decode_one::<StrategyMetadata>(&metadata_bytes.0).ok()
+                candid::decode_one::<StrategyMetadata>(&metadata_bytes.data).ok()
             })
             .collect()
     })
@@ -229,7 +215,7 @@ async fn request_dca_strategy(config: DCAConfig) -> Result<DeploymentRequest, St
         return Err("Anonymous principal cannot deploy strategies".to_string());
     }
     
-    deployment_manager::create_strategy_request(config)
+    deployment_manager::create_strategy_request(config).await
 }
 
 #[update]
@@ -239,7 +225,7 @@ async fn request_value_avg_strategy(config: ValueAvgConfig) -> Result<Deployment
         return Err("Anonymous principal cannot deploy strategies".to_string());
     }
     
-    deployment_manager::create_strategy_request(config)
+    deployment_manager::create_strategy_request(config).await
 }
 
 #[update]
@@ -249,7 +235,7 @@ async fn request_fixed_balance_strategy(config: FixedBalanceConfig) -> Result<De
         return Err("Anonymous principal cannot deploy strategies".to_string());
     }
     
-    deployment_manager::create_strategy_request(config)
+    deployment_manager::create_strategy_request(config).await
 }
 
 #[update]
@@ -259,7 +245,7 @@ async fn request_limit_order_strategy(config: LimitOrderConfig) -> Result<Deploy
         return Err("Anonymous principal cannot deploy strategies".to_string());
     }
     
-    deployment_manager::create_strategy_request(config)
+    deployment_manager::create_strategy_request(config).await
 }
 
 #[update]
@@ -269,12 +255,12 @@ async fn request_self_hedging_strategy(config: SelfHedgingConfig) -> Result<Depl
         return Err("Anonymous principal cannot deploy strategies".to_string());
     }
     
-    deployment_manager::create_strategy_request(config)
+    deployment_manager::create_strategy_request(config).await
 }
 
 // Admin-only force execution
 #[update]
-async fn force_execute_deployment(deployment_id: String) -> Result<DeploymentResult, String> {
+async fn force_execute_deployment(deployment_id: String) -> Result<deployment_manager::DeploymentResult, String> {
     require_admin()?;
     deployment_manager::execute_deployment(&deployment_id).await
 }
@@ -296,36 +282,44 @@ async fn withdraw_icp(recipient: Principal, amount_e8s: u64) -> Result<(), Strin
 async fn deposit_icp(amount: u64) -> Result<u64, String> {
     let user = caller();
     
-    // Verify caller is not anonymous
+    // Anonymous users cannot deposit
     if user == Principal::anonymous() {
-        return Err("Anonymous principal cannot make deposits".to_string());
+        return Err("Anonymous identity cannot make deposits".to_string());
     }
     
-    process_deposit(user, amount).await
+    // Process the deposit and handle errors
+    match process_deposit(user, amount).await {
+        Ok(new_balance) => Ok(new_balance),
+        Err(e) => Err(payment_error_to_string(e))
+    }
 }
 
 #[update]
 async fn withdraw_user_icp(amount: u64) -> Result<u64, String> {
     let user = caller();
     
-    // Verify caller is not anonymous
+    // Anonymous users cannot withdraw
     if user == Principal::anonymous() {
-        return Err("Anonymous principal cannot withdraw funds".to_string());
+        return Err("Anonymous identity cannot withdraw funds".to_string());
     }
     
-    // Process user withdrawal
-    user_withdraw_funds(user, amount).await
+    // Process the withdrawal and handle errors
+    match user_withdraw_funds(user, amount).await {
+        Ok(new_balance) => Ok(new_balance),
+        Err(e) => Err(payment_error_to_string(e))
+    }
 }
 
 #[query]
 fn get_balance() -> u64 {
     let user = caller();
-    get_user_account(user).map_or(0, |account| account.balance)
+    get_user_account(user).balance
 }
 
 #[query]
-fn get_account_info() -> Option<UserAccount> {
+fn get_account_info() -> UserAccount {
     let user = caller();
+
     get_user_account(user)
 }
 
@@ -345,7 +339,7 @@ fn get_transaction_history() -> Vec<TransactionRecord> {
 }
 
 #[update]
-fn adjust_balance(user: Principal, amount: u64, reason: String) -> Result<(), String> {
+async fn adjust_balance(user: Principal, amount: u64, reason: String) -> Result<(), String> {
     // Verify caller is admin
     require_admin()?;
     
@@ -358,7 +352,7 @@ fn adjust_balance(user: Principal, amount: u64, reason: String) -> Result<(), St
         amount,
         TransactionType::AdminAdjustment,
         reason
-    );
+    ).await;
     
     Ok(())
 }
@@ -367,15 +361,18 @@ fn adjust_balance(user: Principal, amount: u64, reason: String) -> Result<(), St
 #[update]
 fn reset_system_timers() -> Result<(), String> {
     require_admin()?;
-    timer::reset_timers();
+    timer::cancel_timers();
+    timer::schedule_timers();
     Ok(())
 }
 
 #[query]
 fn get_timer_status() -> String {
-    if is_admin() {
-        timer::get_timer_status()
-    } else {
-        "Available only to admins".to_string()
-    }
+    timer::get_timer_status()
+}
+
+// Version information
+#[query]
+fn get_version() -> String {
+    "1.0.3".to_string()
 } 

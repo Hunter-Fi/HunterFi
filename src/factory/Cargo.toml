@@ -6,6 +6,9 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+export_candid = []
+
 [dependencies]
 candid = { workspace = true }
 ic-cdk = { workspace = true }
@@ -13,6 +16,9 @@ ic-cdk-macros = { workspace = true }
 ic-cdk-timers = { workspace = true }
 serde = { workspace = true }
 ic-stable-structures = { workspace = true }
-serde_bytes = "0.11"
+serde_bytes = { workspace = true }
+ic-ledger-types = { workspace = true }
+async-trait = { workspace = true }
 strategy_common = { path = "../strategy_common" }
 hex = "0.4.3"
+bincode = { workspace = true }
