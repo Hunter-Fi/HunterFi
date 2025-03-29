@@ -1,11 +1,10 @@
 use candid::{CandidType, Deserialize, Principal};
-use ic_ledger_types::Tokens;
 use serde::Serialize;
 use std::collections::HashMap;
 use serde_bytes::ByteBuf;
 
 /// Defines available strategy types in the system
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum StrategyType {
     DollarCostAveraging,
     ValueAveraging,
@@ -15,7 +14,7 @@ pub enum StrategyType {
 }
 
 /// Defines the status of a strategy
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum StrategyStatus {
     Created,
     Running,
@@ -25,7 +24,7 @@ pub enum StrategyStatus {
 }
 
 /// Defines the supported DEXes
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Exchange {
     ICPSwap,
     KongSwap,
@@ -35,7 +34,7 @@ pub enum Exchange {
 }
 
 /// Defines token metadata
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TokenMetadata {
     pub canister_id: Principal,
     pub symbol: String,
@@ -43,21 +42,21 @@ pub struct TokenMetadata {
 }
 
 /// Defines a trading pair
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TradingPair {
     pub base_token: TokenMetadata,
     pub quote_token: TokenMetadata,
 }
 
 /// Defines order type (buy/sell)
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum OrderType {
     Buy,
     Sell,
 }
 
 /// Defines a trade transaction
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Transaction {
     pub id: u64,
     pub timestamp: u64,
@@ -72,7 +71,7 @@ pub struct Transaction {
 }
 
 /// Defines transaction status
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TransactionStatus {
     Pending,
     Executed,
@@ -80,14 +79,14 @@ pub enum TransactionStatus {
 }
 
 /// Result type for strategy operations
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum StrategyResult {
     Success,
     Error(String),
 }
 
 /// Strategy metadata
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct StrategyMetadata {
     pub canister_id: Principal,
     pub strategy_type: StrategyType,
@@ -165,7 +164,7 @@ pub enum OrderSplitType {
 }
 
 /// Deployment process status
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DeploymentStatus {
     PendingPayment,
     AuthorizationConfirmed,
@@ -181,7 +180,7 @@ pub enum DeploymentStatus {
 }
 
 /// Deployment record
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DeploymentRecord {
     pub deployment_id: String,
     pub strategy_type: StrategyType,

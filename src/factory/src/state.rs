@@ -420,15 +420,54 @@ pub struct UpgradeData {
     pub admins: HashSet<Principal>,
     pub deployment_id_counter: u64,
     pub deployment_fee: u64,
+    #[serde(default)]
+    pub transactions: Option<Vec<(String, TransactionRecord)>>,
+    #[serde(default)]
+    pub user_accounts: Option<HashMap<Principal, UserAccount>>,
+    #[serde(default)]
+    pub strategies: Option<Vec<(Principal, StrategyMetadata)>>,
 }
 
 // Pre-upgrade data
 pub fn get_upgrade_data() -> UpgradeData {
+    let transactions = TRANSACTIONS.with(|t| {
+        let mut tx_vec = Vec::new();
+        for (key_bytes, val_bytes) in t.borrow().iter() {
+            if let (Some(tx_id), Some(record)) = (key_bytes.into_inner(), val_bytes.into_inner()) {
+                tx_vec.push((tx_id, record));
+            }
+        }
+        tx_vec
+    });
+    
+    let user_accounts = USER_ACCOUNTS.with(|accounts| {
+        let mut user_map = HashMap::new();
+        for (key_bytes, val_bytes) in accounts.borrow().iter() {
+            if let (Some(principal), Some(account)) = (key_bytes.into_inner(), val_bytes.into_inner()) {
+                user_map.insert(principal, account);
+            }
+        }
+        user_map
+    });
+    
+    let strategies = STRATEGIES.with(|s| {
+        let mut strategies_vec = Vec::new();
+        for (key_bytes, val_bytes) in s.borrow().iter() {
+            if let (Some(principal), Some(metadata)) = (key_bytes.into_inner(), val_bytes.into_inner()) {
+                strategies_vec.push((principal, metadata));
+            }
+        }
+        strategies_vec
+    });
+    
     UpgradeData {
         owner_strategies: OWNER_STRATEGIES.with(|m| m.borrow().clone()),
         admins: ADMINS.with(|a| a.borrow().clone()),
         deployment_id_counter: DEPLOYMENT_ID_COUNTER.with(|c| c.get()),
         deployment_fee: DEPLOYMENT_FEE.with(|f| f.get()),
+        transactions: Some(transactions),
+        user_accounts: Some(user_accounts),
+        strategies: Some(strategies),
     }
 }
 
@@ -438,6 +477,33 @@ pub fn restore_upgrade_data(data: UpgradeData) {
     ADMINS.with(|a| *a.borrow_mut() = data.admins);
     DEPLOYMENT_ID_COUNTER.with(|c| c.set(data.deployment_id_counter));
     DEPLOYMENT_FEE.with(|f| f.set(data.deployment_fee));
+    
+    if let Some(transactions) = data.transactions {
+        TRANSACTIONS.with(|t| {
+            let mut transactions_map = t.borrow_mut();
+            for (tx_id, record) in transactions {
+                transactions_map.insert(GenericBytes::new(&tx_id), GenericBytes::new(&record));
+            }
+        });
+    }
+    
+    if let Some(accounts) = data.user_accounts {
+        USER_ACCOUNTS.with(|accounts_ref| {
+            let mut accounts_map = accounts_ref.borrow_mut();
+            for (principal, account) in accounts {
+                accounts_map.insert(GenericBytes::new(&principal), GenericBytes::new(&account));
+            }
+        });
+    }
+    
+    if let Some(strategies) = data.strategies {
+        STRATEGIES.with(|s| {
+            let mut strategies_map = s.borrow_mut();
+            for (principal, metadata) in strategies {
+                strategies_map.insert(GenericBytes::new(&principal), GenericBytes::new(&metadata));
+            }
+        });
+    }
 }
 
 // Generate a unique transaction ID

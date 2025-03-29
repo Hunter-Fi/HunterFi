@@ -3,31 +3,15 @@
     "factory": {
       "candid": "src/factory/factory.did",
       "package": "factory",
-      "type": "rust"
-    },
-    "strategy_dca": {
-      "candid": "src/strategies/dca/dca.did",
-      "package": "strategy_dca",
-      "type": "rust"
-    },
-    "strategy_value_avg": {
-      "candid": "src/strategies/value_avg/value_avg.did",
-      "package": "strategy_value_avg",
-      "type": "rust"
-    },
-    "strategy_fixed_balance": {
-      "candid": "src/strategies/fixed_balance/fixed_balance.did",
-      "package": "strategy_fixed_balance", 
-      "type": "rust"
-    },
-    "strategy_limit_order": {
-      "candid": "src/strategies/limit_order/limit_order.did",
-      "package": "strategy_limit_order",
+      "build": "cargo build --target wasm32-unknown-unknown --release --package factory",
+      "wasm": "target/wasm32-unknown-unknown/release/factory.wasm",
       "type": "rust"
     },
     "strategy_self_hedging": {
       "candid": "src/strategies/self_hedging/self_hedging.did",
       "package": "strategy_self_hedging",
+      "build": "cargo build --target wasm32-unknown-unknown --release --package strategy_self_hedging",
+      "wasm": "target/wasm32-unknown-unknown/release/strategy_self_hedging.wasm",
       "type": "rust"
     },
     "frontend": {
@@ -51,4 +35,4 @@
     }
   },
   "version": 1
-} 
+}

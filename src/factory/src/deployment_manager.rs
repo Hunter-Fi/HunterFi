@@ -192,6 +192,7 @@ pub async fn execute_deployment(deployment_id: &str) -> Result<DeploymentResult,
     // Create canister
     let canister_id = match create_strategy_canister().await {
         Ok(cid) => {
+            ic_cdk::println!("Deployment create_strategy_canister successfully: {}", cid);
             // Update status
             update_deployment_status(
                 deployment_id, 
@@ -202,6 +203,7 @@ pub async fn execute_deployment(deployment_id: &str) -> Result<DeploymentResult,
             cid
         },
         Err(err) => {
+            ic_cdk::println!("Deployment create_strategy_canister error: {}", err);
             return handle_deployment_failure(
                 deployment_id,
                 None,
@@ -283,8 +285,9 @@ pub async fn execute_deployment(deployment_id: &str) -> Result<DeploymentResult,
         }
     };
     
-    // Store metadata
-    store_strategy_metadata(metadata);
+    ic_cdk::println!("Storing strategy metadata: canister_id={}", metadata.canister_id);
+    store_strategy_metadata(metadata.clone());
+    ic_cdk::println!("Strategy metadata stored successfully");
     
     // Update status to deployed
     update_deployment_status(
@@ -333,6 +336,8 @@ async fn initialize_strategy(
     strategy_type: StrategyType,
     config_data: &[u8],
 ) -> Result<(), String> {
+    ic_cdk::println!("Start initializing strategy: canister_id={}, type={:?}", canister_id, strategy_type);
+    
     match strategy_type {
         StrategyType::DollarCostAveraging => {
             let config = candid::decode_one::<DCAConfig>(config_data)
@@ -359,8 +364,15 @@ async fn initialize_strategy(
             initialize_strategy_with_config(canister_id, owner, "init_limit_order", config).await
         },
         StrategyType::SelfHedging => {
+            ic_cdk::println!("Decoding Self Hedging config, data size: {} bytes", config_data.len());
             let config = candid::decode_one::<SelfHedgingConfig>(config_data)
-                .map_err(|e| format!("Failed to decode Self Hedging config: {}", e))?;
+                .map_err(|e| {
+                    ic_cdk::println!("Failed to decode Self Hedging config: {}", e);
+                    format!("Failed to decode Self Hedging config: {}", e)
+                })?;
+            
+            ic_cdk::println!("Self Hedging config decoded successfully: transaction_size={}, check_interval={}", 
+                          config.transaction_size, config.check_interval_secs);
             
             initialize_strategy_with_config(canister_id, owner, "init_self_hedging", config).await
         },
@@ -374,6 +386,9 @@ async fn initialize_strategy_with_config<T: CandidType>(
     method: &str,
     config: T,
 ) -> Result<(), String> {
+    ic_cdk::println!("Initializing strategy: canister_id={}, owner={}, method={}", 
+                    canister_id, owner, method);
+    
     let call_result: CallResult<()> = call(
         canister_id,
         method,
@@ -381,11 +396,19 @@ async fn initialize_strategy_with_config<T: CandidType>(
     ).await;
     
     match call_result {
-        Ok(_) => Ok(()),
-        Err((code, msg)) => Err(format!(
-            "Failed to initialize strategy: code={:?}, message={}",
-            code, msg
-        )),
+        Ok(_) => {
+            ic_cdk::println!("Strategy initialization successful: canister_id={}, method={}", 
+                           canister_id, method);
+            Ok(())
+        },
+        Err((code, msg)) => {
+            ic_cdk::println!("Strategy initialization failed: canister_id={}, method={}, code={:?}, message={}", 
+                           canister_id, method, code, msg);
+            Err(format!(
+                "Failed to initialize strategy: code={:?}, message={}",
+                code, msg
+            ))
+        },
     }
 }
 
@@ -544,7 +567,21 @@ async fn create_strategy_canister() -> Result<Principal, String> {
         settings: Some(settings),
     };
     
-    let result = create_canister(args, 0u128).await;
+    // Provide enough cycles for canister creation and initial operation
+    // Canister creation requires 38,461,538,461 cycles plus additional cycles for initialization
+    let creation_cycles: u128 = 40_000_000_000 + 60_000_000_000; // Creation fee + initial running cycles
+    
+    // Ensure factory canister has sufficient cycles
+    let current_balance: u128 = ic_cdk::api::canister_balance() as u128;
+    if current_balance < creation_cycles {
+        return Err(format!(
+            "Factory canister balance insufficient to create new canister. Current balance: {} cycles, required: {} cycles",
+            current_balance, creation_cycles
+        ));
+    }
+    
+    ic_cdk::println!("Creating new strategy canister with {} cycles", creation_cycles);
+    let result = create_canister(args, creation_cycles).await;
     
     match result {
         Ok((record,)) => Ok(record.canister_id),
@@ -567,7 +604,10 @@ async fn install_strategy_code(
     let result = install_code(args).await;
     
     match result {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            ic_cdk::println!("Deployment install_strategy_code successfully: {}", canister_id);
+            Ok(())
+        }
         Err((code, msg)) => Err(format!("Error code: {:?}, message: {}", code, msg)),
     }
 }

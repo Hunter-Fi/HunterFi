@@ -1,6 +1,7 @@
 use candid::{CandidType, Deserialize};
 use serde::Serialize;
-use crate::types::{TokenMetadata, TradingPair, OrderType, Transaction, TransactionStatus};
+use async_trait::async_trait;
+use crate::types::{TokenMetadata, TradingPair, OrderType};
 
 /// Exchange price information
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]

@@ -10,4 +10,4 @@ serde = { workspace = true }
 serde_bytes = { workspace = true }
 ic-cdk-timers = { workspace = true }
 ic-ledger-types = { workspace = true }
-async-trait = "0.1.68" 
+async-trait = { workspace = true } 

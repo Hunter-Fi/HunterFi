@@ -35,8 +35,8 @@ The following table shows the current integration status for various decentraliz
 |----------|--------|-------------------|-------|
 | ICPSwap | ✅ Complete | Swaps, Liquidity Pools, Price Feeds | Full integration with all trading pairs |
 | KongSwap | 🔄 In Progress | Basic Swaps | Core functionality working, advanced features coming soon |
-| Sonic | 🔄 In Progress | Price Feeds | coming soon |
-| ICDex | 🔍 Planned | - | coming soon |
+| Sonic | 🔄 In Progress | Price Feeds | Coming soon |
+| ICDex | 🔍 Planned | - | Coming soon |
 
 Legend:
 - ✅ Complete: Fully integrated and tested
@@ -45,7 +45,7 @@ Legend:
 
 ## 🏗️ System Architecture
 
-# Architecture Diagram
+### Architecture Diagram
 ```
 ┌───────────┐     ┌─────────────────┐
 │  Factory  │◄────┤ User/Frontend   │
@@ -83,270 +83,373 @@ HunterFi employs a modular design, primarily consisting of the following compone
 
 #### Factory Canister (factory)
 
-HunterFi is a decentralized finance strategy platform that enables users to deploy and manage automated trading strategies on the Internet Computer. The Factory Canister is responsible for strategy creation, deployment, and management.
+The Factory Canister is the central component of HunterFi that manages:
+- User account balances and deposit/withdrawal processing
+- Transaction history tracking and account management
+- Strategy canister deployment and lifecycle
+- WASM module installation for different strategy types
+- Administrative functions and fee management
+
+# HunterFi Factory Canister
+
+The Factory Canister is the core component of the HunterFi platform, responsible for user account management, strategy deployment, and canister lifecycle management.
+
+## Key Features
+
+1. **Account Management System**
+   - User balance tracking with stable memory
+   - Secure deposit and withdrawal functionality
+   - Complete transaction history with event logging
+   - Principal-based account identification
+
+2. **Strategy Deployment Engine**
+   - Dynamic strategy creation and configuration
+   - Automatic fee collection from user balances
+   - Multi-phase deployment state management
+   - Automatic refund handling for failed deployments
+
+3. **Canister Management**
+   - Dynamic canister creation and configuration
+   - WASM module installation and version control
+   - Strategy canister lifecycle monitoring
+   - Inter-canister communication handling
+
+4. **Administrative Capabilities**
+   - Role-based permission system
+   - Fee configuration management
+   - Emergency failsafe mechanisms
+   - System monitoring and maintenance features
+
+## Stable Storage Architecture
+
+The Factory Canister implements a robust stable storage architecture using `ic-stable-structures`:
+
+```
+┌─────────────────────────────────────────────────┐
+│                 Stable Storage                   │
+├─────────────┬──────────────┬───────────────────┤
+│ UserAccounts│ Transactions │ DeploymentRecords │
+├─────────────┼──────────────┼───────────────────┤
+│ Strategies  │ AdminRoles   │ WasmModules       │
+└─────────────┴──────────────┴───────────────────┘
+```
+
+- **Memory Optimization**: Efficient storage allocation with minimal memory overhead
+- **Upgrade Safety**: Protected state during canister upgrades
+- **Data Integrity**: Transaction-like safety for critical operations
+- **Scalability**: Designed to handle thousands of user accounts and strategies
 
 ## Deployment Process
 
-HunterFi implements a two-phase deployment process based on ICRC2 standard to address the non-atomic nature of ICP transactions:
+HunterFi implements a deposit-based deployment model with comprehensive state tracking:
 
-### Phase One: Deployment Preparation
+### Account Balance System
 
-1. **Create Deployment Request**
-   - User submits strategy type and configuration
-   - System generates a unique deployment ID and returns fee information
-   - Status is marked as `PendingPayment`
+1. **User Deposit Flow**
+   ```
+   User Request -> Ledger Transaction -> Balance Update -> Transaction Record
+   ```
+   - Minimum deposit: 0.01 ICP (1,000,000 e8s)
+   - Maximum deposit: 1,000 ICP (100,000,000,000 e8s)
+   - Transaction ID generation ensures idempotency
 
-2. **User Payment Authorization**
-   - User calls `icrc2_approve` through their wallet to authorize the Factory Canister to use a specified amount of ICP
-   - User confirms deployment intent by submitting the deployment_id
-   - System verifies the authorization amount is sufficient
-   - Status is updated to `AuthorizationConfirmed`
+2. **Account Balance Management**
+   - Real-time balance tracking with optimistic locking
+   - Transaction history with pagination support
+   - Balance reservation during pending deployments
 
-### Phase Two: Deployment Execution
+### Strategy Deployment Flow
 
-1. **Fee Collection and Canister Creation**
-   - System calls `icrc2_transfer_from` to collect the fee
-   - Creates new Canister and sets controller permissions
-   - Installs the appropriate WASM module for the strategy type
-   - Status progresses through `PaymentReceived` -> `CanisterCreated` -> `CodeInstalled`
+1. **Request and Payment Phase**
+   ```
+   Strategy Request -> Balance Verification -> Fee Deduction -> Status: PaymentReceived
+   ```
+   - Atomic fee deduction with rollback capability
+   - Configurable fee structure based on strategy type
+   - Detailed deployment record creation
 
-2. **Initialization and Completion**
-   - Initializes the strategy with user-provided configuration
-   - Records strategy metadata
-   - Status progresses to `Initialized` -> `Deployed`
+2. **Deployment Execution Phase**
+   ```
+   Canister Creation -> WASM Installation -> Initialization -> Status: Deployed
+   ```
+   - Step-by-step state tracking with detailed logging
+   - Automatic retry mechanism for transient failures
+   - Controlled error propagation and handling
 
-3. **Error Handling**
-   - If deployment fails, status is set to `DeploymentFailed`
-   - Refund process is initiated, status updates to `Refunding` -> `Refunded`
+3. **Error Recovery**
+   ```
+   Failure Detection -> Automatic Refund -> Status: Refunded
+   ```
+   - Comprehensive error classification and handling
+   - Full refund processing with transaction recording
+   - Detailed failure reporting for troubleshooting
 
 ## State Management
 
-The system monitors deployment states through scheduled tasks, handling:
-- Timed-out deployment requests
-- Post-payment incomplete deployments
-- Failed deployment refunds
-- Refund retries
+The system employs a sophisticated state management system:
 
-## Main Interfaces
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│ PendingState│────►│ ActiveState │────►│ FinalState  │
+└─────────────┘     └─────────────┘     └─────────────┘
+       │                   │                   │
+       ▼                   ▼                   ▼
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│ Validation  │     │ Processing  │     │ Completion  │
+│ Functions   │     │ Functions   │     │ Functions   │
+└─────────────┘     └─────────────┘     └─────────────┘
+```
 
-### Deployment Request Interfaces
-- `request_dca_strategy`: Request to deploy a Dollar Cost Averaging strategy
-- `request_value_avg_strategy`: Request to deploy a Value Averaging strategy
-- `request_fixed_balance_strategy`: Request to deploy a Fixed Balance strategy
-- `request_limit_order_strategy`: Request to deploy a Limit Order strategy
-- `request_self_hedging_strategy`: Request to deploy a Self-Hedging strategy
+- **Timers**: Scheduled tasks run every 5 minutes
+- **State Reconciliation**: Automatic recovery of stuck deployments
+- **Timeout Handling**: Deployments older than 24 hours are automatically refunded
 
-### Deployment Confirmation and Management
-- `confirm_deployment`: Confirm authorization and execute deployment
-- `get_deployment`: Retrieve deployment record
-- `get_my_deployment_records`: Get user's deployment records
-- `request_refund`: Request a refund
+## Interface Specification
+
+### Account Management
+```rust
+// Deposit ICP to your account
+#[update]
+deposit_icp(amount: u64) -> Result<u64, String>;
+
+// Withdraw ICP from your account
+#[update]
+withdraw_user_icp(amount: u64) -> Result<u64, String>;
+
+// Get account balance and details
+#[query]
+get_account_info() -> UserAccount;
+
+// Get transaction history
+#[query]
+get_transaction_history() -> Vec<TransactionRecord>;
+```
+
+### Strategy Deployment
+```rust
+// Request DCA strategy deployment
+#[update]
+request_dca_strategy(config: DCAConfig) -> Result<DeploymentRequest, String>;
+
+// Request Value Average strategy deployment
+#[update]
+request_value_avg_strategy(config: ValueAvgConfig) -> Result<DeploymentRequest, String>;
+
+// Request Fixed Balance strategy deployment
+#[update]
+request_fixed_balance_strategy(config: FixedBalanceConfig) -> Result<DeploymentRequest, String>;
+
+// Request Limit Order strategy deployment
+#[update]
+request_limit_order_strategy(config: LimitOrderConfig) -> Result<DeploymentRequest, String>;
+
+// Request Self-Hedging strategy deployment
+#[update]
+request_self_hedging_strategy(config: SelfHedgingConfig) -> Result<DeploymentRequest, String>;
+
+// Get deployment status
+#[query]
+get_deployment(deployment_id: String) -> Option<DeploymentRecord>;
+```
 
 ### Strategy Management
-- `get_strategy`: Get strategy information
-- `get_strategies_by_owner`: Get user's strategy list
-- `get_all_strategies`: Get all strategies
+```rust
+// Get strategy information
+#[query]
+get_strategy(canister_id: Principal) -> Option<StrategyMetadata>;
+
+// Get user's strategy list
+#[query]
+get_strategies_by_owner(owner: Principal) -> Vec<StrategyMetadata>;
+
+// Get all strategies (admin only)
+#[query]
+get_all_strategies() -> Vec<StrategyMetadata>;
+
+// Get strategy count
+#[query]
+get_strategy_count() -> u64;
+```
 
 ### Admin Functions
-- `set_deployment_fee`: Set deployment fee
-- `install_strategy_wasm`: Install strategy WASM module
-- `add_admin`: Add an admin
-- `remove_admin`: Remove an admin
-- `restart_timers`: Restart scheduled tasks
-- `withdraw_icp`: Withdraw ICP from the canister
+```rust
+// Set deployment fee
+#[update(guard = "is_admin")]
+set_deployment_fee(fee_e8s: u64) -> Result<(), String>;
 
-## Usage Example
+// Get current deployment fee
+#[query]
+get_deployment_fee() -> u64;
 
-### 1. Deploying a DCA Strategy
+// Add/remove admins
+#[update(guard = "is_admin")]
+add_admin(principal: Principal) -> Result<(), String>;
+#[update(guard = "is_admin")]
+remove_admin(principal: Principal) -> Result<(), String>;
+
+// Restart system timers
+#[update(guard = "is_admin")]
+reset_system_timers() -> Result<(), String>;
+
+// Admin withdrawal
+#[update(guard = "is_admin")]
+withdraw_icp(recipient: Principal, amount_e8s: u64) -> Result<(), String>;
+
+// Adjust user balance
+#[update(guard = "is_admin")]
+adjust_balance(user: Principal, amount: u64, reason: String) -> Result<(), String>;
+```
+
+## Usage Examples
+
+### 1. Account Management
+
 ```javascript
-// 1. Create deployment request
-const deploymentRequest = await factory.request_dca_strategy({
+// Deposit ICP to account
+const amount = 100_000_000n; // 1 ICP
+const depositResult = await factory.deposit_icp(amount);
+if ("Ok" in depositResult) {
+  console.log(`Deposit successful, new balance: ${depositResult.Ok} e8s`);
+} else {
+  console.error(`Deposit failed: ${depositResult.Err}`);
+}
+
+// Withdraw ICP (must have sufficient balance)
+const withdrawAmount = 50_000_000n; // 0.5 ICP
+const withdrawResult = await factory.withdraw_user_icp(withdrawAmount);
+if ("Ok" in withdrawResult) {
+  console.log(`Withdrawal successful, new balance: ${withdrawResult.Ok}`);
+} else {
+  console.error(`Withdrawal failed: ${withdrawResult.Err}`);
+}
+
+// Get account information
+const account = await factory.get_account_info();
+console.log(`Account balance: ${account.balance} e8s`);
+console.log(`Total deposited: ${account.total_deposited} e8s`);
+console.log(`Total consumed: ${account.total_consumed} e8s`);
+
+// Get transaction history
+const transactions = await factory.get_transaction_history();
+transactions.forEach(tx => {
+  console.log(`Transaction ${tx.transaction_id}: ${tx.transaction_type} - ${tx.amount} e8s`);
+});
+```
+
+### 2. Strategy Deployment
+
+```javascript
+// Deploy a DCA strategy
+const dcaConfig = {
   exchange: { ICPSwap: null },
-  base_token: { canister_id: Principal.fromText("..."), symbol: "ICP", decimals: 8 },
-  quote_token: { canister_id: Principal.fromText("..."), symbol: "USDC", decimals: 6 },
-  amount_per_execution: 10_000_000n, // 0.1 ICP
-  interval_secs: 86400n, // Execute daily
-  max_executions: [30n], // Execute 30 times
-  slippage_tolerance: 0.5 // 0.5% slippage tolerance
-});
+  base_token: { 
+    canister_id: Principal.fromText("ryjl3-tyaaa-aaaaa-aaaba-cai"), 
+    symbol: "ICP", 
+    decimals: 8 
+  },
+  quote_token: { 
+    canister_id: Principal.fromText("mxzaz-hqaaa-aaaar-qaada-cai"), 
+    symbol: "USDC", 
+    decimals: 6 
+  },
+  amount_per_execution: 10_000_000n, // 0.1 ICP per execution
+  interval_secs: 86400n,             // Execute daily
+  max_executions: 30n,               // Execute 30 times total
+  slippage_tolerance: 0.5            // 0.5% slippage tolerance
+};
 
-// 2. Authorize Factory to use ICP
-await icpLedger.icrc2_approve({
-  spender: { owner: factoryCanisterId },
-  amount: deploymentRequest.fee_amount,
-  expires_at: [] // No expiration
-});
-
-// 3. Confirm deployment
-await factory.confirm_deployment(deploymentRequest.deployment_id);
-
-// 4. Query deployment status
-const status = await factory.get_deployment(deploymentRequest.deployment_id);
+const deploymentResult = await factory.request_dca_strategy(dcaConfig);
+if ("Ok" in deploymentResult) {
+  const deploymentRequest = deploymentResult.Ok;
+  console.log(`Deployment requested: ${deploymentRequest.deployment_id}`);
+  console.log(`Fee deducted: ${deploymentRequest.fee_amount} e8s`);
+  
+  // Check deployment status after a few seconds
+  setTimeout(async () => {
+    const statusResult = await factory.get_deployment(deploymentRequest.deployment_id);
+    if (statusResult) {
+      console.log(`Current status: ${statusResult.status}`);
+      if (statusResult.status === "Deployed") {
+        console.log(`Strategy canister: ${statusResult.canister_id}`);
+      }
+    }
+  }, 5000);
+} else {
+  console.error(`Deployment failed: ${deploymentResult.Err}`);
+}
 ```
 
-## Security Features
+## Error Handling System
 
-1. **State Tracking**: Complete deployment state tracking for transparency
-2. **Scheduled Monitoring**: Automatic handling of deployments stuck in intermediate states
-3. **Refund Mechanism**: Automatic refund process for failed deployments
-4. **Permission Control**: Strict admin permissions system
-5. **Unique IDs**: Each deployment request has a unique ID to prevent duplicate processing
+HunterFi implements comprehensive error handling with detailed error types:
 
-## Strategy Types
+```rust
+// Transaction Types
+pub enum TransactionType {
+    Deposit,
+    DeploymentFee,
+    Refund,
+    AdminAdjustment,
+    Withdrawal,
+    Transfer,
+}
 
-### Dollar Cost Averaging Strategy (strategy_dca)
-- Implements the dollar-cost averaging method, periodically investing a fixed amount
-- Executes trades at fixed time intervals
-- Uses a preset amount to purchase assets
-- Allows starting, pausing, and managing execution
-
-### Value Averaging Strategy (strategy_value_avg)
-- Adjusts investment based on performance relative to a target growth curve
-- Determines investment amount based on actual account performance
-- Maintains account value growth according to a predetermined trajectory
-- Dynamically increases investment when below target, decreases when above target
-
-### Fixed Balance Strategy (strategy_fixed_balance)
-- Maintains a constant account balance through periodic rebalancing
-- Regularly monitors account balance
-- Executes buy or sell operations to adjust to target value
-- Suitable for investors seeking stability amid market fluctuations
-
-### Limit Order Strategy (strategy_limit_order)
-- Implements limit order functionality for specific price points
-- Continuously monitors market prices
-- Automatically executes trades when conditions are met
-- Supports setting multiple buy/sell conditions
-
-### Self-Hedging Strategy (strategy_self_hedging)
-- Creates balanced buying and selling operations to increase trading volume
-- Executes synchronized buying and selling transactions
-- Operates at predetermined frequency and trade sizes
-- Allows configuration of trading frequency, quantity, and price range
-
-## 🔧 Technology Stack
-
-### Backend
-- **Rust**: Primary development language for implementing canister logic
-- **Candid**: Interface Definition Language (IDL) for defining canister interfaces
-- **ic-cdk**: Internet Computer Development Kit
-- **ic-stable-structures**: Persistent storage management library
-
-### Frontend
-- **React**: User interface framework
-- **TypeScript**: Type-safe JavaScript superset
-- **Ant Design**: UI component library
-- **dfx**: DFINITY Canister SDK
-- **Internet Identity**: Authentication
-
-## 🚀 Quick Start
-
-### Prerequisites
-
-- [Rust](https://www.rust-lang.org/tools/install) >= 1.60.0
-- [DFX](https://internetcomputer.org/docs/current/developer-docs/setup/install) >= 0.14.0
-- [Node.js](https://nodejs.org/) >= 16.x (required for frontend development)
-
-### Local Development
-
-1. **Clone Repository and Install Dependencies**
-
-```bash
-git clone https://github.com/yourusername/hunterfi.git
-cd hunterfi
-npm install  # Install frontend dependencies
+// Deployment Status
+pub enum DeploymentStatus {
+    PendingPayment,
+    AuthorizationConfirmed,
+    PaymentReceived,
+    CanisterCreated,
+    CodeInstalled,
+    Initialized,
+    Deployed,
+    DeploymentCancelled,
+    DeploymentFailed,
+    Refunding,
+    Refunded,
+}
 ```
 
-2. **Start Local Internet Computer Network**
+### Recovery Mechanisms
 
-```bash
-dfx start --background --clean
-```
+1. **Automatic Retry System**
+   - Failed WASM installations retry up to 3 times
+   - Failed canister creations retry with exponential backoff
+   - Failed refunds are retried on the next timer tick
 
-3. **Deploy Canisters**
+2. **Manual Recovery Options**
+   - Admin interface for manual deployment intervention
+   - Stuck deployment resolution through admin console
+   - Emergency fund recovery mechanisms
 
-```bash
-dfx deploy
-```
+## Security Considerations
 
-4. **Initialize Factory Canister**
+The Factory Canister incorporates multiple security mechanisms:
 
-```bash
-# Get Factory canister ID
-FACTORY_ID=$(dfx canister id factory)
+1. **Guard-based Access Control**
+   - Role-based permission system for admin functions
+   - Principal-based account access restrictions
+   - Granular permission model for different operations
 
-# Deploy DCA strategy WASM
-dfx canister call factory install_strategy_wasm '(record { strategy_type = variant { DollarCostAveraging }; wasm_module = blob })'
-```
+2. **Transaction Security**
+   - Atomic operations with rollback capability
+   - Idempotent transaction handling
+   - Complete audit trail of all financial operations
 
-5. **Start Frontend Development Server**
+3. **Input Validation**
+   - Comprehensive parameter validation
+   - Type-safe interfaces with Candid
+   - Boundary checking for all numeric inputs
 
-```bash
-npm start
-```
+4. **Deployment Protection**
+   - Fee verification before deployment
+   - Resource allocation limits
+   - Deployment timeout monitoring
 
-The application will be available at `http://localhost:8080`, with API requests proxied to the replica at port 4943.
+## Project Structure
 
-## 📝 Usage Guide
-
-### Deploying a New Strategy
-
-1. Connect with Internet Identity to log in to the platform
-2. Navigate to the "Deploy Strategy" page
-3. Select strategy type (DCA, Value Averaging, etc.)
-4. Configure strategy parameters:
-   - Trading pair
-   - Exchange
-   - Investment amount
-   - Execution frequency
-   - Maximum slippage
-5. Confirm and deploy (1 ICP deployment fee will be charged)
-
-### Managing Strategies
-
-1. View all deployed strategies on the "My Strategies" page
-2. Click on strategy cards to view details
-3. Use control options:
-   - Start/Pause strategy
-   - Execute manually once
-   - View historical transaction records
-   - Modify strategy parameters
-
-## 🔒 Security Considerations
-
-- **Fund Security**: User funds are always under user control, the platform does not hold user assets
-- **Code Audit**: All strategy code is open-source and transparent, fully auditable
-- **Error Handling**: The system is designed with comprehensive error handling mechanisms to ensure stable execution
-- **Slippage Protection**: Trade execution includes slippage protection mechanisms to prevent losses from price volatility
-
-## 🌐 Mainnet Deployment
-
-Deploying to ICP mainnet is similar to local deployment, but requires:
-
-1. Set mainnet identity: `dfx identity use <your_identity>`
-2. Ensure sufficient cycles for deployment
-3. Deploy to mainnet: `dfx deploy --network ic`
-
-## 🛠️ Developer Resources
-
-- [Internet Computer Documentation](https://internetcomputer.org/docs/)
-- [Rust Canister Development Guide](https://internetcomputer.org/docs/current/developer-docs/backend/rust/)
-- [ic-cdk Documentation](https://docs.rs/ic-cdk)
-- [ic-cdk-macros Documentation](https://docs.rs/ic-cdk-macros)
-- [Candid Introduction](https://internetcomputer.org/docs/current/developer-docs/backend/candid/)
-
-## 🤝 Contribution Guidelines
-
-Code contributions, issue reporting, and improvement suggestions are welcome. Please follow these steps:
-
-1. Fork this repository
-2. Create a feature branch: `git checkout -b feature/amazing-feature`
-3. Commit changes: `git commit -m 'Add some amazing feature'`
-4. Push to the branch: `git push origin feature/amazing-feature`
-5. Open a Pull Request
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details
-
+- `src/factory`: The main factory canister that manages strategy deployment and user accounts
+- `src/strategy_common`: Common utilities and types shared across canisters
+- `src/strategies/`: Individual strategy implementations (DCA, ValueAveraging, etc.)
+- `src/exchange/`: Exchange connectors and adapters
 

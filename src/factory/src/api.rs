@@ -37,14 +37,14 @@ fn init() {
     ic_cdk::println!("Factory canister initialized with embedded WASM modules");
     
     // Schedule timers
-    timer::schedule_timers();
+    // timer::schedule_timers();
 }
 
 // Pre/Post upgrade hooks
 #[pre_upgrade]
 fn pre_upgrade() {
     // Cancel timers before upgrade
-    timer::cancel_timers();
+    // timer::cancel_timers();
     
     // Save state
     state_pre_upgrade();
@@ -55,11 +55,8 @@ fn post_upgrade() {
     // Restore state
     state_post_upgrade();
     
-    // Using embedded WASM modules directly, no reinitialization needed
-    ic_cdk::println!("Factory canister upgraded with embedded WASM modules");
-    
     // Restart timers
-    timer::schedule_timers();
+    // timer::schedule_timers();
 }
 
 // Admin functions
@@ -160,10 +157,11 @@ fn get_strategies_by_owner(owner: Principal) -> Vec<StrategyMetadata> {
 
 #[query]
 fn get_all_strategies() -> Vec<StrategyMetadata> {
+    require_admin()?;
     crate::state::STRATEGIES.with(|s| {
         s.borrow().iter()
             .filter_map(|(_, metadata_bytes)| {
-                candid::decode_one::<StrategyMetadata>(&metadata_bytes.data).ok()
+                metadata_bytes.into_inner()
             })
             .collect()
     })
@@ -375,4 +373,12 @@ fn get_timer_status() -> String {
 #[query]
 fn get_version() -> String {
     "1.0.3".to_string()
+}
+
+#[query]
+fn debug_strategies_storage() -> String {
+    let count = crate::state::STRATEGIES.with(|s| s.borrow().len());
+    let owner_count = crate::state::OWNER_STRATEGIES.with(|o| o.borrow().len());
+    
+    format!("Strategy count in stable storage: {}\nOwner count: {}", count, owner_count)
 } 
