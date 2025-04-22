@@ -1,0 +1,17 @@
+[package]
+name = "exchange"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+candid = { workspace = true }
+ic-cdk = { workspace = true }
+ic-cdk-macros = { workspace = true }
+serde = { workspace = true }
+serde_bytes = { workspace = true }
+ic-cdk-timers = { workspace = true }
+ic-ledger-types = { workspace = true }
+async-trait = { workspace = true }
+strategy_common = { path = "../strategy_common" }
+anyhow = { workspace = true }
+bincode = { workspace = true } 
