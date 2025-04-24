@@ -4,6 +4,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use ic_cdk::api::call::{CallResult, RejectionCode};
 use std::convert::TryFrom;
+use ic_ledger_types::{AccountIdentifier, AccountBalanceArgs, Tokens, DEFAULT_SUBACCOUNT};
 
 use crate::error::*;
 use crate::types::*;
@@ -407,11 +408,7 @@ impl ICPSwapConnector {
         let amount_out_minimum_str = amount_out_minimum.to_string();
         
         // 7. First, transfer tokens to the corresponding Pool subaccount
-        let fee = match input_token.standard {
-            TokenStandard::ICRC1 => 10000, // ICP fee
-            TokenStandard::ICRC2 => 10,    // ckBTC fee
-            _ => return Err(ExchangeError::NotImplemented),
-        };
+        let fee = pool_data.fee.0.bits();
         
         self.transfer_token_to_pool_subaccount(input_token, &&pool_data.canisterId, params.amount, fee).await?;
         
@@ -552,10 +549,35 @@ impl Exchange for ICPSwapConnector {
                 ).await;
                 
                 match result {
-                    Ok((balance,)) => Ok(u128::try_from(balance.0).unwrap()),
-                    Err((code, msg)) => Err(ExchangeError::CanisterCallError(format!("Failed to query balance: {:?} - {}", code, msg))),
+                    Ok((balance,)) => Ok(u128::try_from(balance.0).unwrap_or(0)), // Use unwrap_or for safety
+                    Err((code, msg)) => Err(ExchangeError::CanisterCallError(format!("Failed to query ICRC balance: {:?} - {}", code, msg))),
                 }
             },
+            TokenStandard::ICP => {
+                // ICP Ledger Canister ID (Mainnet)
+                let ledger_canister_id = Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai")
+                    .expect("Failed to parse ICP ledger canister ID");
+
+                // Calculate account identifier from principal
+                let account_identifier = AccountIdentifier::new(&owner, &DEFAULT_SUBACCOUNT);
+
+                // Prepare arguments for account_balance
+                let args = AccountBalanceArgs {
+                    account: account_identifier,
+                };
+
+                // Call account_balance on the ICP ledger
+                let result: CallResult<(Tokens,)> = ic_cdk::api::call::call(
+                    ledger_canister_id,
+                    "account_balance",
+                    (args,),
+                ).await;
+
+                match result {
+                    Ok((tokens,)) => Ok(tokens.e8s() as u128), // Balance is in e8s (u64), cast to u128
+                    Err((code, msg)) => Err(ExchangeError::CanisterCallError(format!("Failed to query ICP balance: {:?} - {}", code, msg))),
+                }
+            }
             _ => Err(ExchangeError::NotImplemented),
         }
     }
@@ -627,7 +649,14 @@ impl Trading for ICPSwapConnector {
 impl TokenOperations for ICPSwapConnector {
     /// Deposit tokens into the exchange
     async fn deposit_token(&self, token: &TokenInfo, amount: u128) -> ExchangeResult<u128> {
-        Err(ExchangeError::NotImplemented)
+        let deposit_args = ICPSwapDepositArgs {
+            fee: 3000,
+            token: token.canister_id.to_string(),
+            amount: amount.to_string(),
+        };
+
+        let deposit_result = self.call_deposit(&token.canister_id, deposit_args).await?.parse::<u128>().unwrap();
+        Ok(deposit_result)
     }
     
     /// Withdraw tokens from the exchange
