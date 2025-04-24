@@ -648,12 +648,71 @@ impl TokenOperations for ICPSwapConnector {
     }
 }
 
+// Helper function to convert standard string to TokenStandard enum
+fn string_to_token_standard(standard: &str) -> ExchangeResult<TokenStandard> {
+    match standard {
+        "ICRC1" => Ok(TokenStandard::ICRC1),
+        "ICRC2" => Ok(TokenStandard::ICRC2),
+        "DIP20" => Ok(TokenStandard::DIP20),
+        "EXT" => Ok(TokenStandard::EXT),
+        "ICP" => Ok(TokenStandard::ICP),
+        _ => Err(ExchangeError::UnsupportedToken(format!("Unknown standard string: {}", standard))),
+    }
+}
+
 #[async_trait]
 impl LiquidityPool for ICPSwapConnector {
     /// Get information about a liquidity pool
     async fn get_pool_info(&self, base: &TokenInfo, quote: &TokenInfo) -> ExchangeResult<PoolInfo> {
-        // Placeholder implementation, needs refinement in actual application
-        Err(ExchangeError::NotImplemented)
+        // 1. Get Pool Canister ID and basic data from Factory
+        let pool_data = self.get_pool_canister(base, quote).await?;
+
+        // 2. Parse token addresses
+        let token0_principal = Principal::from_text(&pool_data.token0.address)
+            .map_err(|e| ExchangeError::InternalError(format!("Failed to parse token0 principal: {}", e)))?;
+        let token1_principal = Principal::from_text(&pool_data.token1.address)
+            .map_err(|e| ExchangeError::InternalError(format!("Failed to parse token1 principal: {}", e)))?;
+
+        // 3. Convert token standards
+        let token0_standard_enum = string_to_token_standard(&pool_data.token0.standard)?;
+        let token1_standard_enum = string_to_token_standard(&pool_data.token1.standard)?;
+
+        // 4. Determine which input token corresponds to token0/token1 based on sorting
+        //    (Assuming ICPSwapPoolData.token0 is the lexicographically smaller one)
+        let (actual_token0_info, actual_token1_info) =
+            // pool_data.token0 is the base token
+            (
+                TokenInfo { // Constructing based on pool_data and input base token
+                    canister_id: token0_principal,
+                    symbol: base.symbol.clone(),
+                    decimals: base.decimals,
+                    standard: token0_standard_enum,
+                },
+                TokenInfo { // Constructing based on pool_data and input quote token
+                    canister_id: token1_principal,
+                    symbol: quote.symbol.clone(),
+                    decimals: quote.decimals,
+                    standard: token1_standard_enum,
+                }
+            );
+        
+        // 5. Convert fee from Nat to u64 (assuming PoolInfo.fee is u64)
+        let fee_u64: u64 = match pool_data.fee.0.clone().try_into() {
+            Ok(val) => val,
+            Err(e) => return Err(ExchangeError::InternalError(format!("Failed to convert pool fee Nat {:?} to u64: {}", pool_data.fee.0, e))),
+        };
+
+        // 6. Construct PoolInfo - Liquidity and reserves require calling the pool canister itself
+        //    For now, setting them to 0 as placeholders.
+        Ok(PoolInfo {
+            pool_id: pool_data.canisterId,
+            token0: actual_token0_info, // Use the determined token info
+            token1: actual_token1_info, // Use the determined token info
+            fee: fee_u64,
+            total_liquidity: 0, // Placeholder - requires call to pool canister
+            token0_reserves: 0, // Placeholder - requires call to pool canister
+            token1_reserves: 0, // Placeholder - requires call to pool canister
+        })
     }
     
     /// Add liquidity to a pool
