@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use candid::{CandidType, Deserialize, Principal};
+use candid::{CandidType, Deserialize, Principal, Nat, Int};
 use serde::Serialize;
 use std::collections::HashMap;
 use ic_cdk::api::call::{CallResult, RejectionCode};
@@ -26,7 +26,7 @@ pub struct ICPSwapToken {
 /// ICPSwap arguments for getting pool information
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct ICPSwapGetPoolArgs {
-    pub fee: u64,
+    pub fee: Nat,
     pub token0: ICPSwapToken,
     pub token1: ICPSwapToken,
 }
@@ -34,9 +34,9 @@ pub struct ICPSwapGetPoolArgs {
 /// ICPSwap pool information structure
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct ICPSwapPoolData {
-    pub fee: u64,
+    pub fee: Nat,
     pub key: String,
-    pub tickSpacing: i64,
+    pub tickSpacing: Int,
     pub token0: ICPSwapToken,
     pub token1: ICPSwapToken,
     pub canisterId: Principal,
@@ -69,7 +69,7 @@ pub struct ICPSwapQuoteArgs {
 /// ICPSwap quote result type
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub enum ICPSwapQuoteResult {
-    ok(String), // ICPSwap returns amount as String
+    ok(Nat), // Changed from String to Nat based on documentation
     err(ICPSwapError),
 }
 
@@ -157,24 +157,25 @@ impl ICPSwapConnector {
         };
 
         let args = ICPSwapGetPoolArgs {
-            fee: 3000, // Default fee tier for ICPSwap (0.3%)
+            fee: Nat::from(3000_u64),
             token0: self.token_to_icpswap_token(token0),
             token1: self.token_to_icpswap_token(token1),
         };
 
         ic_cdk::println!("Calling getPool with args: {:?}", args); // Debug log
+        // Use 'call' for both query and update. IC determines mode based on target method.
         let result: CallResult<(ICPSwapPoolResult,)> = ic_cdk::api::call::call(
             self.factory_canister_id,
             "getPool",
             (args,),
         ).await;
-        ic_cdk::println!("getPool result: {:?}", result); // Debug log
+        ic_cdk::println!("getPool call result: {:?}", result); // Debug log
 
         match result {
             Ok((pool_result,)) => match pool_result {
                 ICPSwapPoolResult::ok(pool_data) => Ok(pool_data),
                 ICPSwapPoolResult::err(err) => {
-                    ic_cdk::println!("getPool returned error: {:?}", err); // Debug log
+                    ic_cdk::println!("getPool call returned error: {:?}", err); // Debug log
                     Err(self.map_icpswap_error(err))
                 },
             },
@@ -196,20 +197,21 @@ impl ICPSwapConnector {
     }
 
     /// Calls the quote method on the ICPSwap pool canister
-    async fn call_quote(&self, pool_id: &Principal, args: ICPSwapQuoteArgs) -> ExchangeResult<String> {
+    async fn call_quote(&self, pool_id: &Principal, args: ICPSwapQuoteArgs) -> ExchangeResult<Nat> { // Return Nat
         ic_cdk::println!("Calling quote on pool {} with args: {:?}", pool_id, args); // Debug log
+        // Use 'call' for both query and update. IC determines mode based on target method.
         let result: CallResult<(ICPSwapQuoteResult,)> = ic_cdk::api::call::call(
             *pool_id,
             "quote",
             (args,),
         ).await;
-         ic_cdk::println!("quote result: {:?}", result); // Debug log
+         ic_cdk::println!("quote call result: {:?}", result); // Debug log
 
         match result {
             Ok((quote_result,)) => match quote_result {
-                ICPSwapQuoteResult::ok(amount_str) => Ok(amount_str),
+                ICPSwapQuoteResult::ok(amount_nat) => Ok(amount_nat), // Return Nat directly
                 ICPSwapQuoteResult::err(err) => {
-                     ic_cdk::println!("quote returned error: {:?}", err); // Debug log
+                     ic_cdk::println!("quote call returned error: {:?}", err); // Debug log
                      Err(self.map_icpswap_error(err))
                 },
             },
@@ -466,32 +468,44 @@ impl ICPSwapConnector {
             TradeDirection::Buy => (&params.pair.quote_token, &params.pair.base_token),
             TradeDirection::Sell => (&params.pair.base_token, &params.pair.quote_token),
         };
-        
-        // Determine zero_for_one value
         let zero_for_one = self.is_zero_for_one(input_token, output_token);
         
         // Create quote arguments
         let quote_args = ICPSwapQuoteArgs {
             zeroForOne: zero_for_one,
             amountIn: params.amount.to_string(),
-            amountOutMinimum: "0".to_string(), // No need to set minimum output for quote
+            amountOutMinimum: "0".to_string(), 
         };
+
+        // Call the quote method - expecting Nat now
+        let quote_amount_nat = self.call_quote(pool_id, quote_args).await?;
         
-        // Call the quote method
-        let quote_amount = self.call_quote(pool_id, quote_args).await?;
-        
+        // Convert Nat to u128 via accessing tuple field 0 for BigUint, then cloning and using try_into()
+        let quote_amount_u128: u128 = match quote_amount_nat.0.clone().try_into() { 
+            Ok(val) => val,
+            // Updated error message to show the BigUint value and the error
+            Err(e) => return Err(ExchangeError::InternalError(format!("Failed to convert quote BigUint {:?} to u128: {}", quote_amount_nat.0, e))), 
+        };
+
         // Calculate fee (0.3%)
         let fee_amount = (params.amount as f64 * 0.003) as u128;
         
+        // Calculate price - handle potential division by zero
+        let price = if params.amount > 0 {
+            quote_amount_u128 as f64 / params.amount as f64 
+        } else {
+            0.0
+        };
+
         // Construct quote result
         let quote_result = QuoteResult {
             input_amount: params.amount,
-            output_amount: quote_amount.parse::<u128>().unwrap(), // Assuming quote_amount is a String representing u128
-            price: quote_amount.parse::<f64>().unwrap() / params.amount as f64, // Assuming quote_amount is a String representing f64 or parsable
+            output_amount: quote_amount_u128,
+            price,
             fee_amount,
             price_impact: 0.0, // Price impact not directly available from ICPSwap API, can be improved later
         };
-        
+
         Ok(quote_result)
     }
 }

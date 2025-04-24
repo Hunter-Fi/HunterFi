@@ -156,15 +156,15 @@ fn get_strategies_by_owner(owner: Principal) -> Vec<StrategyMetadata> {
 }
 
 #[query]
-fn get_all_strategies() -> Vec<StrategyMetadata> {
+fn get_all_strategies() -> Result<Vec<StrategyMetadata>, String> {
     require_admin()?;
-    crate::state::STRATEGIES.with(|s| {
+    Ok(crate::state::STRATEGIES.with(|s| {
         s.borrow().iter()
             .filter_map(|(_, metadata_bytes)| {
                 metadata_bytes.into_inner()
             })
             .collect()
-    })
+    }))
 }
 
 #[query]
