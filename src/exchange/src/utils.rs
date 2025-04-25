@@ -2,6 +2,7 @@ use candid::Principal;
 use crate::types::*;
 use crate::error::*;
 use std::time::{SystemTime, UNIX_EPOCH};
+use ic_cdk::api::time as ic_time;
 
 /// Converts a Principal to a Blob representation for subaccounts.
 pub fn principal_to_subaccount(principal: &Principal) -> Vec<u8> {
@@ -41,18 +42,12 @@ pub fn is_slippage_exceeded(expected: u128, actual: u128, tolerance: f64) -> boo
 
 /// Gets the current timestamp in seconds.
 pub fn current_timestamp_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_secs()
+    ic_time() / 1_000_000_000
 }
 
 /// Gets the current timestamp in nanoseconds.
 pub fn current_timestamp_nanos() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_nanos() as u64
+    ic_time()
 }
 
 /// Generates a unique trade ID.

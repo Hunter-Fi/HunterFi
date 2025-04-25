@@ -29,6 +29,7 @@ pub enum ExchangeError {
     UnsupportedToken(String),
     InvalidTokenStandard,
     TokenTransferFailed(String),
+    TokenApprovalFailed(String),
     
     // Parameter related errors
     InvalidParameters(String),
@@ -62,6 +63,7 @@ impl fmt::Display for ExchangeError {
             Self::UnsupportedToken(token) => write!(f, "Unsupported token: {}", token),
             Self::InvalidTokenStandard => write!(f, "Invalid token standard"),
             Self::TokenTransferFailed(reason) => write!(f, "Token transfer failed: {}", reason),
+            Self::TokenApprovalFailed(reason) => write!(f, "Token approval failed: {}", reason),
             Self::InvalidParameters(msg) => write!(f, "Invalid parameters: {}", msg),
             Self::InvalidAmount => write!(f, "Invalid amount"),
             Self::Unauthorized => write!(f, "Unauthorized operation"),
