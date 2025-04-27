@@ -1,0 +1,83 @@
+type Exchange = variant {
+  ICPSwap;
+  KongSwap;
+  Sonic;
+  InfinitySwap;
+  ICDex;
+};
+
+type TokenMetadata = record {
+  canister_id : principal;
+  symbol : text;
+  decimals : nat8;
+};
+
+type OrderSplitType = variant {
+  NoSplit;
+  SplitBuy;
+  SplitSell;
+  SplitBoth;
+};
+
+type StrategyStatus = variant {
+  Created;
+  Running;
+  Paused;
+  EmergencyStopped;
+  Terminated;
+};
+
+type StrategyResult = variant {
+  Success;
+  Error : text;
+};
+
+type SelfHedgingConfig = record {
+  exchange : Exchange;
+  trading_token : TokenMetadata;
+  transaction_size : nat;
+  order_split_type : OrderSplitType;
+  check_interval_secs : nat64;
+  slippage_tolerance : float64;
+};
+
+type SelfHedgingState = record {
+  owner : principal;
+  config : SelfHedgingConfig;
+  status : StrategyStatus;
+  last_execution : opt nat64;
+  execution_count : nat64;
+  volume_generated : nat;
+  order_split_type : OrderSplitType;
+  transaction_size : nat;
+};
+
+type VolumeStats = record {
+  total_volume : nat;
+  execution_count : nat64;
+  last_execution : opt nat64;
+  transaction_size : nat;
+  split_type : OrderSplitType;
+  token_symbol : text;
+};
+
+service : {
+  // Initialization function
+  init_self_hedging : (principal, SelfHedgingConfig) -> (StrategyResult);
+  
+  // Strategy control
+  start : () -> (StrategyResult);
+  pause : () -> (StrategyResult);
+  stop : () -> (StrategyResult);
+  execute_once : () -> (StrategyResult);
+  
+  // Status queries
+  get_status : () -> (StrategyStatus) query;
+  get_state : () -> (variant { Ok : SelfHedgingState; Err : text }) query;
+  
+  // Configuration updates
+  update_volume_config : (nat, OrderSplitType) -> (StrategyResult);
+  
+  // Statistics
+  get_volume_stats : () -> (VolumeStats) query;
+} 

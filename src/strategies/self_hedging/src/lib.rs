@@ -120,6 +120,8 @@ fn init() {
 fn init_self_hedging(owner: Principal, config: SelfHedgingConfig) -> StrategyResult {
     let caller_id = caller();
     
+    ic_cdk::println!("Starting init_self_hedging: caller={}, owner={}", caller_id, owner);
+    
     // Only allow initialization once
     STATE.with(|state| {
         let mut state = state.borrow_mut();
@@ -127,15 +129,21 @@ fn init_self_hedging(owner: Principal, config: SelfHedgingConfig) -> StrategyRes
         
         // Check if already initialized
         if current_state.owner != Principal::anonymous() {
+            ic_cdk::println!("Error: Strategy already initialized. Current owner: {}", current_state.owner);
             return StrategyResult::Error("Strategy already initialized".to_string());
         }
         
+        ic_cdk::println!("Validating configuration: transaction_size={}, check_interval={}",
+                        config.transaction_size, config.check_interval_secs);
+        
         // Validate configuration
         if config.transaction_size == 0 {
+            ic_cdk::println!("Error: Transaction size must be greater than zero");
             return StrategyResult::Error("Transaction size must be greater than zero".to_string());
         }
         
         if config.check_interval_secs == 0 {
+            ic_cdk::println!("Error: Check interval cannot be zero");
             return StrategyResult::Error("Check interval cannot be zero".to_string());
         }
         
@@ -151,10 +159,18 @@ fn init_self_hedging(owner: Principal, config: SelfHedgingConfig) -> StrategyRes
             transaction_size: config.transaction_size,
         };
         
+        ic_cdk::println!("Saving new state with owner: {}", owner);
+        
         // Store the new state
         match state.set(new_state) {
-            Ok(_) => StrategyResult::Success,
-            Err(e) => StrategyResult::Error(format!("Failed to initialize: {:?}", e)),
+            Ok(_) => {
+                ic_cdk::println!("Initialization successful");
+                StrategyResult::Success
+            },
+            Err(e) => {
+                ic_cdk::println!("Error saving state: {:?}", e);
+                StrategyResult::Error(format!("Failed to initialize: {:?}", e))
+            },
         }
     })
 }
