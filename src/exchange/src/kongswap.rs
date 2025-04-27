@@ -86,13 +86,13 @@ impl Trading for KongSwapConnector {
 #[async_trait]
 impl TokenOperations for KongSwapConnector {
     /// Deposits a token to the exchange
-    async fn deposit_token(&self, token: &TokenInfo, amount: u128) -> ExchangeResult<u128> {
+    async fn deposit_token(&self, params: &TradeParams,token: &TokenInfo, amount: u128) -> ExchangeResult<u128> {
         // KongSwap integration not yet complete, returning unimplemented
         Err(ExchangeError::NotImplemented)
     }
     
     /// Withdraws a token from the exchange
-    async fn withdraw_token(&self, token: &TokenInfo, amount: u128) -> ExchangeResult<u128> {
+    async fn withdraw_token(&self, params: &TradeParams,token: &TokenInfo, amount: u128) -> ExchangeResult<u128> {
         // KongSwap integration not yet complete, returning unimplemented
         Err(ExchangeError::NotImplemented)
     }

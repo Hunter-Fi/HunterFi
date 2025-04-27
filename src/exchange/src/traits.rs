@@ -56,10 +56,10 @@ pub trait LiquidityPool: Exchange {
 #[async_trait]
 pub trait TokenOperations: Exchange {
     /// Deposit tokens into the exchange
-    async fn deposit_token(&self, token: &TokenInfo, amount: u128) -> ExchangeResult<u128>;
+    async fn deposit_token(&self, params: &TradeParams,token: &TokenInfo, amount: u128) -> ExchangeResult<u128>;
     
     /// Withdraw tokens from the exchange
-    async fn withdraw_token(&self, token: &TokenInfo, amount: u128) -> ExchangeResult<u128>;
+    async fn withdraw_token(&self, params: &TradeParams,token: &TokenInfo, amount: u128) -> ExchangeResult<u128>;
     
     /// Get the user's unused token balance (e.g., balance not in orders or pools)
     async fn get_unused_balance(&self, params: &TradeParams, user: &Principal) -> ExchangeResult<(u128,u128)>;

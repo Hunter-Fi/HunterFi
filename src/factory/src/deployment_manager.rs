@@ -18,7 +18,6 @@ use ic_cdk::trap;
 const SELF_HEDGING_WASM: &[u8] = include_bytes!("../../../target/wasm32-unknown-unknown/release/strategy_self_hedging.wasm");
 
 // Other strategy files don't exist yet, using mock data (minimal valid WASM header)
-// In production, these should point to actual compiled WASM files
 const MOCK_WASM_HEADER: &[u8] = &[0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00]; // Minimal WASM header
 
 use strategy_common::types::{
@@ -628,7 +627,6 @@ pub fn get_embedded_wasm_module(strategy_type: StrategyType) -> Option<Vec<u8>> 
         StrategyType::ValueAveraging => Some(MOCK_WASM_HEADER.to_vec()),
         StrategyType::FixedBalance => Some(MOCK_WASM_HEADER.to_vec()),
         StrategyType::LimitOrder => Some(MOCK_WASM_HEADER.to_vec()),
-        _ => None,
     }
 }
 

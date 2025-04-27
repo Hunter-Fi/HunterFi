@@ -710,7 +710,7 @@ impl ICPSwapConnector {
             amount: swap_result.clone(),                 // Pass Nat amount directly (use swap_result)
         };
         ic_cdk::println!("Withdrawing output token with args: {:?}", withdraw_args);
-        let _withdraw_result_nat = match self.call_withdraw(&pool_data.canisterId, withdraw_args).await {
+        let withdraw_result_nat = match self.call_withdraw(&pool_data.canisterId, withdraw_args).await {
             Ok(result) => result, // Result is Nat
             Err(e) => {
                 ic_cdk::println!("Withdraw failed: {:?}", e);
@@ -1168,28 +1168,77 @@ impl Trading for ICPSwapConnector {
 #[async_trait]
 impl TokenOperations for ICPSwapConnector {
     /// Deposit tokens into the exchange
-    async fn deposit_token(&self, token: &TokenInfo, amount: u128) -> ExchangeResult<u128> {
-        // Convert fee and amount to Nat correctly
-        let fee_nat = candid::Nat::from(3000_u64); // Specify unsigned type for fee
-        let amount_nat = candid::Nat::from(amount);    // Convert amount directly from u128
+    async fn deposit_token(&self, params: &TradeParams,token: &TokenInfo, amount: u128) -> ExchangeResult<u128> {
+        match token.standard {
+            TokenStandard::ICRC1 => {
+                Err(ExchangeError::InternalError("Unsupported type: ICRC1".to_string()))
+            }
+            TokenStandard::ICRC2| TokenStandard::ICP | TokenStandard::EXT|TokenStandard::DIP20=> {
+                let input_token_fee = match token.standard {
+                    TokenStandard::ICRC1 | TokenStandard::ICP => 10000_u64,
+                    TokenStandard::ICRC2 => 10_u64,
+                    _ => 0_u64,
+                };
+                let input_token_fee_nat = candid::Nat::from(input_token_fee);
+                let pool_data = self.get_pool_canister(&params.pair.base_token, &params.pair.quote_token).await?;
+                // Step 2: NO APPROVE CALL HERE. User MUST approve the pool BEFORE calling execute_trade.
+                self.approve_token(token, &pool_data.canisterId, amount * 100).await?;
+                ic_cdk::println!("Skipping internal approve. Assuming user pre-approved pool {:?}", pool_data.canisterId);
+                let amount_nat = candid::Nat::from(amount);
+                // Step 3: Call depositFrom method (using Nat fee)
+                let deposit_args = ICPSwapDepositFromArgs {
+                    fee: input_token_fee_nat.clone(), // Use input token's standard fee (Nat)
+                    token: token.canister_id.to_string(),
+                    amount: amount_nat.clone(),
+                };
 
-        let deposit_args = ICPSwapDepositArgs {
-            fee: fee_nat,
-            token: token.canister_id.to_string(),
-            amount: amount_nat,
-        };
+                ic_cdk::println!("Calling depositFrom with token fee: {}", input_token_fee_nat);
+                let deposit_result = self.call_deposit_from(&pool_data.canisterId, deposit_args).await
+                    .map_err(|e| {
+                        ic_cdk::println!("DepositFrom failed directly: {:?}", e);
+                        // Potentially call handle_deposit_failure here
+                        e
+                    })?;
+                ic_cdk::println!("DepositFrom result: {}", deposit_result);
+                let deposit_result_u128 = u128::try_from(deposit_result.0.clone())
+                    .map_err(|e| ExchangeError::InternalError(format!("Failed to convert withdraw result Nat {:?} to u128: {}", deposit_result.0, e)))?;
 
-        // call_deposit now returns Nat
-        let deposit_result_nat = self.call_deposit(&token.canister_id, deposit_args).await?; 
-        // Convert Nat to u128 using try_from
-        let deposit_amount_u128 = u128::try_from(deposit_result_nat.0.clone())
-              .map_err(|e| ExchangeError::InternalError(format!("Failed to convert deposit result Nat {:?} to u128: {}", deposit_result_nat.0, e)))?;
-        Ok(deposit_amount_u128)
+                Ok(deposit_result_u128)
+            }
+        }
+        
     }
     
     /// Withdraw tokens from the exchange
-    async fn withdraw_token(&self, _token: &TokenInfo, _amount: u128) -> ExchangeResult<u128> { // Added underscores
-        Err(ExchangeError::NotImplemented)
+    async fn withdraw_token(&self, params: &TradeParams,token: &TokenInfo, amount: u128) -> ExchangeResult<u128> { 
+        let pool_data = self.get_pool_canister(&params.pair.base_token, &params.pair.quote_token).await?;
+        let withdraw_fee_u64 = match token.standard {
+            TokenStandard::ICRC1 | TokenStandard::ICP => 10000_u64,
+            TokenStandard::ICRC2 => 10_u64,
+            TokenStandard::DIP20 => 0_u64,
+            TokenStandard::EXT => 0_u64,
+        };
+        let withdraw_fee_nat = candid::Nat::from(withdraw_fee_u64); // Convert fee to Nat
+        let withdraw_args = ICPSwapWithdrawArgs {
+            fee: withdraw_fee_nat,                       // Pass Nat fee
+            token: token.canister_id.to_string(),
+            amount: Nat::from(amount.clone()),                 // Pass Nat amount directly (use swap_result)
+        };
+        ic_cdk::println!("Withdrawing output token with args: {:?}", withdraw_args);
+        let withdraw_result_nat = match self.call_withdraw(&pool_data.canisterId, withdraw_args).await {
+            Ok(result) => result, // Result is Nat
+            Err(e) => {
+                ic_cdk::println!("Withdraw failed: {:?}", e);
+                // Potentially call handle_withdraw_failure here
+                return Err(e);
+            }
+        };
+
+        // Convert the Nat result to u128 and return it
+        let withdrawn_amount_u128 = u128::try_from(withdraw_result_nat.0.clone())
+            .map_err(|e| ExchangeError::InternalError(format!("Failed to convert withdraw result Nat {:?} to u128: {}", withdraw_result_nat.0, e)))?;
+
+        Ok(withdrawn_amount_u128) // Return the successfully withdrawn amount as u128
     }
     
     /// Query the user's unused token balance (e.g., balance not in orders or pools)
