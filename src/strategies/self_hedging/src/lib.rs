@@ -100,6 +100,9 @@ thread_local! {
             ).expect("Failed to initialize stable cell")
         })
     );
+
+    // Add a thread-safe execution status flag
+    static EXECUTION_IN_PROGRESS: RefCell<bool> = RefCell::new(false);
 }
 
 // Helper function to check if caller is the owner
@@ -401,11 +404,41 @@ fn stop() -> StrategyResult {
 async fn execute_once() -> StrategyResult {
     ic_cdk::println!("Starting execute_once...");
 
-    // Verify the current status allows execution
+    // Verify if the current status allows execution
     if let Err(e) = verify_status(&[StrategyStatus::Running]) {
         ic_cdk::println!("Error: Cannot execute, status check failed: {}", e);
         return StrategyResult::Error(e);
     }
+
+    // Check if an execution is already in progress
+    let already_executing = EXECUTION_IN_PROGRESS.with(|in_progress| {
+        let is_executing = *in_progress.borrow();
+        if is_executing {
+            true
+        } else {
+            // If no execution is in progress, set the flag to true
+            *in_progress.borrow_mut() = true;
+            false
+        }
+    });
+
+    if already_executing {
+        ic_cdk::println!("Warning: Previous execution is still in progress. Skipping.");
+        return StrategyResult::Error("Previous execution still in progress".to_string());
+    }
+
+    // Use defer pattern (RAII) to ensure execution state is reset regardless of how the function exits
+    // This is an application of the RAII pattern, ensuring resource cleanup
+    struct ExecutionGuard;
+    impl Drop for ExecutionGuard {
+        fn drop(&mut self) {
+            EXECUTION_IN_PROGRESS.with(|in_progress| {
+                *in_progress.borrow_mut() = false;
+            });
+            ic_cdk::println!("Execution state reset to 'not executing'");
+        }
+    }
+    let _guard = ExecutionGuard; // The guard ensures the state is reset when it goes out of scope
 
     // Get the current state
     let state_data = STATE.with(|state| state.borrow().get().clone());
@@ -431,6 +464,7 @@ async fn execute_once() -> StrategyResult {
         Err(e) => {
             let error_msg = format!("Failed to check exchange balance: {}", e);
             ic_cdk::println!("Error: {}", error_msg);
+            // Note: The ExecutionGuard will reset EXECUTION_IN_PROGRESS here upon return
             return StrategyResult::Error(error_msg);
         },
     };
@@ -454,6 +488,7 @@ async fn execute_once() -> StrategyResult {
         match pause() {
             StrategyResult::Success => {
                 ic_cdk::println!("Strategy paused successfully due to insufficient balance.");
+                // Note: The ExecutionGuard will reset EXECUTION_IN_PROGRESS here upon return
                 return StrategyResult::Error(format!(
                     "Strategy paused: insufficient {} balance ({}) < 5% of transaction size ({}).",
                     hold_token_symbol, hold_token_balance, state_data.transaction_size
@@ -462,6 +497,7 @@ async fn execute_once() -> StrategyResult {
             StrategyResult::Error(e) => {
                  ic_cdk::println!("Error: Failed to pause strategy despite insufficient balance: {}", e);
                 // Even if pausing fails, we should not proceed with the trade
+                // Note: The ExecutionGuard will reset EXECUTION_IN_PROGRESS here upon return
                 return StrategyResult::Error(format!(
                     "Insufficient {} balance ({}) < 5% of transaction size ({}), but failed to pause: {}",
                     hold_token_symbol, hold_token_balance, state_data.transaction_size, e
@@ -485,6 +521,7 @@ async fn execute_once() -> StrategyResult {
         ic_cdk::println!("Warning: Amount to trade is zero. Skipping execution cycle.");
         // Optionally update last_execution time even if no trade happens?
         // For now, just return success without doing anything.
+        // Note: The ExecutionGuard will reset EXECUTION_IN_PROGRESS here upon return
         return StrategyResult::Success; // Or maybe Error("Amount to trade is zero")? Let's return Success for now.
     }
 
@@ -515,13 +552,16 @@ async fn execute_once() -> StrategyResult {
             ic_cdk::println!("Hedge trades executed successfully. Volume generated: {}", volume);
             // Update state after successful execution
             update_state_after_execution(volume).await
+             // Note: The ExecutionGuard will reset EXECUTION_IN_PROGRESS after this block
         },
         Err(e) => {
              let error_msg = format!("Failed to execute hedge trades: {}", e);
              ic_cdk::println!("Error: {}", error_msg);
+             // Note: The ExecutionGuard will reset EXECUTION_IN_PROGRESS here upon return
              StrategyResult::Error(error_msg)
         }
     }
+    // Note: The ExecutionGuard goes out of scope here, ensuring the state is reset
 }
 
 // Check the available balance in ICPSwap
