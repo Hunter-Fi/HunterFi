@@ -13,3 +13,4 @@ ic-cdk-macros = { workspace = true }
 serde = { workspace = true }
 ic-stable-structures = { workspace = true }
 strategy_common = { path = "../../strategy_common" }
+exchange = { path = "../../exchange" }

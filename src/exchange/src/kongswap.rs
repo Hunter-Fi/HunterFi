@@ -98,7 +98,7 @@ impl TokenOperations for KongSwapConnector {
     }
     
     /// Gets the user's unused token balance
-    async fn get_unused_balance(&self, params: &TradeParams, user: &Principal) -> ExchangeResult<(u128,u128)> {
+    async fn get_unused_balance(&self, params: &TradeParams, user: &Principal) -> ExchangeResult<(u128,u128,String)> {
         // KongSwap integration not yet complete, returning unimplemented
         Err(ExchangeError::NotImplemented)
     }
@@ -106,6 +106,10 @@ impl TokenOperations for KongSwapConnector {
     /// Queries the user's balance in the exchange
     async fn get_exchange_balance(&self, token: &TokenInfo, user: &Principal) -> ExchangeResult<(u128,u128)> {
         // KongSwap integration not yet complete, returning unimplemented
+        Err(ExchangeError::NotImplemented)
+    }
+
+    async fn approve_token(&self, token: &TokenInfo, spender: &Principal, amount: u128) -> ExchangeResult<()> {
         Err(ExchangeError::NotImplemented)
     }
 }

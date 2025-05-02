@@ -62,8 +62,9 @@ pub trait TokenOperations: Exchange {
     async fn withdraw_token(&self, params: &TradeParams,token: &TokenInfo, amount: u128) -> ExchangeResult<u128>;
     
     /// Get the user's unused token balance (e.g., balance not in orders or pools)
-    async fn get_unused_balance(&self, params: &TradeParams, user: &Principal) -> ExchangeResult<(u128,u128)>;
+    async fn get_unused_balance(&self, params: &TradeParams, user: &Principal) -> ExchangeResult<(u128,u128,String)>;
     
     /// Query the user's total balance within the exchange
     async fn get_exchange_balance(&self, token: &TokenInfo, user: &Principal) -> ExchangeResult<(u128,u128)>;
+    async fn approve_token(&self,token: &TokenInfo, spender: &Principal, amount: u128) -> ExchangeResult<()>;
 } 

@@ -10,6 +10,13 @@ type TokenMetadata = record {
   canister_id : principal;
   symbol : text;
   decimals : nat8;
+  standard : text;
+  fee : nat;
+};
+
+type TradingPair = record {
+  base_token : TokenMetadata;
+  quote_token : TokenMetadata;
 };
 
 type OrderSplitType = variant {
@@ -34,7 +41,7 @@ type StrategyResult = variant {
 
 type SelfHedgingConfig = record {
   exchange : Exchange;
-  trading_token : TokenMetadata;
+  trading_pair : TradingPair;
   transaction_size : nat;
   order_split_type : OrderSplitType;
   check_interval_secs : nat64;
@@ -50,6 +57,9 @@ type SelfHedgingState = record {
   volume_generated : nat;
   order_split_type : OrderSplitType;
   transaction_size : nat;
+  base_token_unused_balance : nat;
+  quote_token_unused_balance : nat;
+  last_balance_check : opt nat64;
 };
 
 type VolumeStats = record {
@@ -58,7 +68,31 @@ type VolumeStats = record {
   last_execution : opt nat64;
   transaction_size : nat;
   split_type : OrderSplitType;
-  token_symbol : text;
+  base_token_symbol : text;
+  quote_token_symbol : text;
+};
+
+type BalanceInfo = record {
+  base_token_unused : nat;
+  quote_token_unused : nat;
+  canister_balance : nat;
+  last_update : opt nat64;
+};
+
+type TradingPairInfo = record {
+  base_token_symbol : text;
+  base_token_decimals : nat8;
+  base_token_canister : principal;
+  quote_token_symbol : text;
+  quote_token_decimals : nat8;
+  quote_token_canister : principal;
+};
+
+type StrategyConfigInfo = record {
+  transaction_size : nat;
+  order_split_type : OrderSplitType;
+  check_interval_secs : nat64;
+  slippage_tolerance : float64;
 };
 
 service : {
@@ -76,8 +110,16 @@ service : {
   get_state : () -> (variant { Ok : SelfHedgingState; Err : text }) query;
   
   // Configuration updates
-  update_volume_config : (nat, OrderSplitType) -> (StrategyResult);
+  update_config : (nat, OrderSplitType, nat64, float64) -> (StrategyResult);
   
-  // Statistics
+  // Balance management
+  deposit_to_exchange : (text, nat) -> (StrategyResult);
+  withdraw_from_exchange : (text, nat) -> (StrategyResult);
+  get_balance_info : () -> (BalanceInfo) query;
+  refresh_balance : () -> (StrategyResult);
+  
+  // Trading pair information
+  get_trading_pair_info : () -> (TradingPairInfo) query;
+  get_strategy_config : () -> (StrategyConfigInfo) query;
   get_volume_stats : () -> (VolumeStats) query;
 } 

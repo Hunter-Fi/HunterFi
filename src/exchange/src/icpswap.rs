@@ -1167,6 +1167,9 @@ impl Trading for ICPSwapConnector {
 
 #[async_trait]
 impl TokenOperations for ICPSwapConnector {
+    async fn approve_token(&self,token: &TokenInfo, spender: &Principal, amount: u128) -> ExchangeResult<()> {
+        self.approve_token(token, spender, amount).await
+    }
     /// Deposit tokens into the exchange
     async fn deposit_token(&self, params: &TradeParams,token: &TokenInfo, amount: u128) -> ExchangeResult<u128> {
         match token.standard {
@@ -1242,10 +1245,11 @@ impl TokenOperations for ICPSwapConnector {
     }
     
     /// Query the user's unused token balance (e.g., balance not in orders or pools)
-    async fn get_unused_balance(&self, params: &TradeParams, user: &Principal) -> ExchangeResult<(u128,u128)> { // Added underscores
+    async fn get_unused_balance(&self, params: &TradeParams, user: &Principal) -> ExchangeResult<(u128,u128,String)> { // Added underscores
         // Get pool information
         let pool_data = self.get_pool_canister(&params.pair.base_token, &params.pair.quote_token).await?;
-        Ok(self.call_get_user_unused_balance(&pool_data.canisterId, user).await?)
+        let(balance0_u128, balance1_u128)= self.call_get_user_unused_balance(&pool_data.canisterId, user).await?;
+        Ok((balance0_u128,balance1_u128,pool_data.token0.address))
     }
     
     /// Query the user's total balance within the exchange

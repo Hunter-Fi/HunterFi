@@ -483,6 +483,8 @@ fn create_strategy_metadata(
                                 canister_id: Principal::anonymous(),
                                 symbol: "UNKNOWN".to_string(),
                                 decimals: 8,
+                                standard: "".to_string(),
+                                fee: 0,
                             }
                         } else {
                             return Err("Could not find token metadata in allocation data".to_string());
@@ -498,6 +500,8 @@ fn create_strategy_metadata(
                 canister_id: Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap(),
                 symbol: "ICP".to_string(),
                 decimals: 8,
+                standard: "".to_string(),
+                fee: 0,
             };
             
             Ok(StrategyMetadata {
@@ -542,8 +546,8 @@ fn create_strategy_metadata(
                 status: StrategyStatus::Created,
                 exchange: config.exchange,
                 trading_pair: TradingPair {
-                    base_token: config.trading_token.clone(),
-                    quote_token: config.trading_token.clone(),
+                    base_token: config.trading_pair.base_token,
+                    quote_token: config.trading_pair.quote_token,
                 },
             })
         },
