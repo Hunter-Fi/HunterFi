@@ -105,10 +105,11 @@ thread_local! {
 // Helper function to check if caller is the owner
 fn verify_owner() -> Result<(), String> {
     let caller = caller();
+    let id = ic_cdk::id();
     STATE.with(|state| {
         let state = state.borrow();
         let state_data = state.get();
-        if caller != state_data.owner {
+        if caller != state_data.owner &&  id != caller  {
             return Err("Caller is not the owner".to_string());
         }
         Ok(())
@@ -231,7 +232,7 @@ async fn start() -> StrategyResult {
     }
 
     // Verify the current status allows starting
-    if let Err(e) = verify_status(&[StrategyStatus::Created, StrategyStatus::Paused]) {
+    if let Err(e) = verify_status(&[StrategyStatus::Created, StrategyStatus::Paused,StrategyStatus::Terminated]) {
         return StrategyResult::Error(e);
     }
 
@@ -259,24 +260,6 @@ async fn start() -> StrategyResult {
          },
     };
 
-    // Approve base token for the pool
-    ic_cdk::println!("Approving base token ({}) for pool {}", base_token_info.symbol, pool_data.pool_id);
-    let hold_token = match state_data.config.hold_token == base_token_info.canister_id {
-        true => { base_token_info.clone() },
-        false => { quote_token_info.clone() }
-    };
-    match connector.approve_token(&hold_token, &pool_data.pool_id, u128::MAX).await {
-        Ok(_) => {
-             ic_cdk::println!("Base token approved successfully.");
-        },
-        Err(e) => {
-             let error_msg = format!("Failed to approve base token: {:?}", e);
-             ic_cdk::println!("{}", error_msg);
-            return StrategyResult::Error(error_msg);
-        },
-    }
-    // --- End: Added Pool Info Fetching and Token Approval ---
-
 
     // Check if the balance in ICPSwap is sufficient (Existing balance check logic)
     ic_cdk::println!("Checking ICPSwap balance...");
@@ -299,6 +282,23 @@ async fn start() -> StrategyResult {
         return StrategyResult::Error(error_msg);
     }
 
+    // Approve base token for the pool
+    ic_cdk::println!("Approving base token ({}) for pool {}", base_token_info.symbol, pool_data.pool_id);
+    let hold_token = match state_data.config.hold_token == base_token_info.canister_id {
+        true => { base_token_info.clone() },
+        false => { quote_token_info.clone() }
+    };
+    match connector.approve_token(&hold_token, &pool_data.pool_id, u128::MAX).await {
+        Ok(_) => {
+            ic_cdk::println!("Base token approved successfully.");
+        },
+        Err(e) => {
+            let error_msg = format!("Failed to approve base token: {:?}", e);
+            ic_cdk::println!("{}", error_msg);
+            return StrategyResult::Error(error_msg);
+        },
+    }
+    // --- End: Added Pool Info Fetching and Token Approval ---
     // Get the check interval from config
     let check_interval = state_data.config.check_interval_secs;
 
@@ -399,85 +399,134 @@ fn stop() -> StrategyResult {
 // Execute the strategy once
 #[update]
 async fn execute_once() -> StrategyResult {
-    // Anyone can trigger execution if the strategy is running
-    // We'll check the status to ensure it's running
+    ic_cdk::println!("Starting execute_once...");
+
+    // Verify the current status allows execution
     if let Err(e) = verify_status(&[StrategyStatus::Running]) {
+        ic_cdk::println!("Error: Cannot execute, status check failed: {}", e);
         return StrategyResult::Error(e);
     }
 
-    ic_cdk::println!("execute_once------");
     // Get the current state
     let state_data = STATE.with(|state| state.borrow().get().clone());
+    ic_cdk::println!("Current state fetched: hold_token={}, transaction_size={}",
+                    state_data.config.hold_token, state_data.transaction_size);
 
-    // Check if the previous execution has completed
+    // Check if the previous execution might still be in progress
     if let Some(last_execution) = state_data.last_execution {
-        // If last execution time + 5 seconds > current time, it might still be in progress
-        if last_execution + 5 > time() {
+        // Using a 5-second cooldown period
+        if last_execution.saturating_add(5_000_000_000) > time() { // time() is in nanoseconds
+             ic_cdk::println!("Warning: Previous execution might still be in progress (last: {}, current: {}). Skipping.", last_execution, time());
             return StrategyResult::Error("Previous execution may still be in progress".to_string());
         }
     }
 
-    // Check the available balance in ICPSwap
+    // --- Balance Check and Amount Determination ---
+    ic_cdk::println!("Checking exchange balance...");
     let (base_balance, quote_balance) = match check_icpswap_balance().await {
-        Ok((base, quote)) => (base, quote),
-        Err(e) => return StrategyResult::Error(format!("Failed to check exchange balance: {}", e)),
+        Ok((base, quote)) => {
+            ic_cdk::println!("Exchange balance fetched: Base={}, Quote={}", base, quote);
+            (base, quote)
+        },
+        Err(e) => {
+            let error_msg = format!("Failed to check exchange balance: {}", e);
+            ic_cdk::println!("Error: {}", error_msg);
+            return StrategyResult::Error(error_msg);
+        },
     };
 
-    // Check if the balance is sufficient to execute the strategy
-    // If the balance is less than 5% of the single transaction amount, pause the strategy
-    let min_amount = state_data.transaction_size / 20; // 5%
-    if base_balance < min_amount && quote_balance < min_amount {
+    let hold_token_is_base = state_data.config.hold_token == state_data.config.trading_pair.base_token.canister_id;
+    let hold_token_balance = if hold_token_is_base { base_balance } else { quote_balance };
+    let hold_token_symbol = if hold_token_is_base {
+        &state_data.config.trading_pair.base_token.symbol
+    } else {
+        &state_data.config.trading_pair.quote_token.symbol
+    };
+
+    ic_cdk::println!("Hold token is {}. Balance: {}", hold_token_symbol, hold_token_balance);
+
+    // Check if balance is less than 5% of transaction_size
+    let min_required_balance = state_data.transaction_size / 20; // 5%
+    if hold_token_balance < min_required_balance {
+        ic_cdk::println!("Error: Hold token balance ({}) is less than 5% of transaction size ({}). Pausing strategy.",
+                        hold_token_balance, state_data.transaction_size);
         // Automatically pause the strategy
         match pause() {
             StrategyResult::Success => {
-                return StrategyResult::Error("Strategy paused: insufficient balance (less than 5% of transaction size)".to_string());
+                ic_cdk::println!("Strategy paused successfully due to insufficient balance.");
+                return StrategyResult::Error(format!(
+                    "Strategy paused: insufficient {} balance ({}) < 5% of transaction size ({}).",
+                    hold_token_symbol, hold_token_balance, state_data.transaction_size
+                ));
             },
             StrategyResult::Error(e) => {
-                return StrategyResult::Error(format!("Strategy should be paused due to insufficient balance, but failed: {}", e));
+                 ic_cdk::println!("Error: Failed to pause strategy despite insufficient balance: {}", e);
+                // Even if pausing fails, we should not proceed with the trade
+                return StrategyResult::Error(format!(
+                    "Insufficient {} balance ({}) < 5% of transaction size ({}), but failed to pause: {}",
+                    hold_token_symbol, hold_token_balance, state_data.transaction_size, e
+                ));
             }
         }
     }
 
-    // Determine the trading direction (buy or sell)
-    // Determine the initial trade direction based on whether the base token is token0 or token1 and which has a larger balance
-    let (use_base_token, amount) = if base_balance >= state_data.transaction_size {
-        (true, state_data.transaction_size)
-    } else if quote_balance >= state_data.transaction_size {
-        (false, state_data.transaction_size)
+    // Determine the actual amount to trade for this cycle
+    let amount_to_trade = if hold_token_balance >= state_data.transaction_size {
+        state_data.transaction_size
     } else {
-        // Neither balance is sufficient for the full transaction size, use the larger balance
-        if base_balance > quote_balance {
-            (true, base_balance)
-        } else {
-            (false, quote_balance)
-        }
+        ic_cdk::println!("Warning: Hold token balance ({}) is less than transaction size ({}). Using available balance.",
+                        hold_token_balance, state_data.transaction_size);
+        hold_token_balance // Use the available balance if it's less than the configured size but above 5%
     };
 
-    // Generate split orders
-    let split_count = get_split_order_count(state_data.transaction_size as usize);
-    let split_amounts = split_amount(amount, split_count);
+     ic_cdk::println!("Amount to trade determined: {}", amount_to_trade);
 
-    // Execute trades
-    match execute_hedge_trades(use_base_token, split_amounts, state_data.order_split_type.clone()).await {
+    if amount_to_trade == 0 {
+        ic_cdk::println!("Warning: Amount to trade is zero. Skipping execution cycle.");
+        // Optionally update last_execution time even if no trade happens?
+        // For now, just return success without doing anything.
+        return StrategyResult::Success; // Or maybe Error("Amount to trade is zero")? Let's return Success for now.
+    }
+
+    // --- Trade Execution ---
+    // Determine the initial trade direction: Sell the hold_token
+    // If hold_token is base, we sell base (Sell direction)
+    // If hold_token is quote, we sell quote (Buy direction means buy base using quote)
+    let initial_direction = if hold_token_is_base {
+        exchange_types::TradeDirection::Sell
+    } else {
+        exchange_types::TradeDirection::Buy
+    };
+    ic_cdk::println!("Initial trade direction (selling {}): {:?}", hold_token_symbol, initial_direction);
+
+    // Generate random split order count (3-10)
+    let split_count = get_split_order_count();
+    ic_cdk::println!("Generated split count: {}", split_count);
+
+    // Split the amount
+    let split_amounts = split_amount(amount_to_trade, split_count);
+    ic_cdk::println!("Split amounts: {:?}", split_amounts);
+
+
+    // Execute the two-stage hedge trades
+    ic_cdk::println!("Executing hedge trades...");
+    match execute_hedge_trades(initial_direction, split_amounts, state_data.order_split_type).await {
         Ok(volume) => {
-            // Update state
+            ic_cdk::println!("Hedge trades executed successfully. Volume generated: {}", volume);
+            // Update state after successful execution
             update_state_after_execution(volume).await
         },
-        Err(e) => StrategyResult::Error(format!("Failed to execute hedge trades: {}", e))
+        Err(e) => {
+             let error_msg = format!("Failed to execute hedge trades: {}", e);
+             ic_cdk::println!("Error: {}", error_msg);
+             StrategyResult::Error(error_msg)
+        }
     }
 }
 
 // Check the available balance in ICPSwap
 async fn check_icpswap_balance() -> Result<(u128, u128), String> {
     let state_data = STATE.with(|state| state.borrow().get().clone());
-    
-    // Check for cached balance, return directly if available and not older than 30 seconds
-    if let Some(last_check) = state_data.last_balance_check {
-        if last_check + 30 > time() && 
-           (state_data.base_token_unused_balance > 0 || state_data.quote_token_unused_balance > 0) {
-            return Ok((state_data.base_token_unused_balance, state_data.quote_token_unused_balance));
-        }
-    }
     
     // Create ICPSwap connector
     let connector = create_icpswap_connector(&state_data.config.exchange);
@@ -589,9 +638,10 @@ fn token_standard_from_string(standard: &str) -> exchange_types::TokenStandard {
 }
 
 // Calculate the number of orders to split into
-fn get_split_order_count(base_count: usize) -> usize {
-    let random_addition = (time() % 3) as usize;
-    base_count + random_addition
+fn get_split_order_count() -> usize {
+    // Generate a pseudo-random number between 3 and 10 (inclusive) using timestamp
+    // (time() % 8) produces a value from 0 to 7. Adding 3 shifts the range to 3 to 10.
+    (time() % 8) as usize + 3
 }
 
 // Split amount into multiple small orders
@@ -618,111 +668,193 @@ fn split_amount(total_amount: u128, split_count: usize) -> Vec<u128> {
 
 // Execute hedge trades
 async fn execute_hedge_trades(
-    use_base_token: bool, 
-    split_amounts: Vec<u128>, 
+    initial_direction: exchange_types::TradeDirection, // Direction for the FIRST stage (selling hold_token)
+    initial_split_amounts: Vec<u128>, // Amounts for the FIRST stage trade(s)
     split_type: OrderSplitType
 ) -> Result<u128, String> {
+    ic_cdk::println!("Entering execute_hedge_trades: initial_direction={:?}, split_amounts={:?}, split_type={:?}",
+                    initial_direction, initial_split_amounts, split_type);
+
     let state_data = STATE.with(|state| state.borrow().get().clone());
     let connector = create_icpswap_connector(&state_data.config.exchange);
-    let mut params = create_trade_params(&state_data.config);
-    
+    let mut params = create_trade_params(&state_data.config); // Creates params with default direction/amount
+
     let mut total_volume = 0u128;
-    
-    // First stage trade - sell initial token
+
+    // --- Stage 1: Sell Hold Token ---
+    params.direction = initial_direction; // Set direction for the first stage
+    let hold_token_is_base = state_data.config.hold_token == state_data.config.trading_pair.base_token.canister_id;
+
+    // Determine if the first stage should be split based on split_type and the action (selling hold token)
     let should_split_first = match split_type {
         OrderSplitType::NoSplit => false,
-        OrderSplitType::SplitBuy => !use_base_token, // If selling quote_token (buying base_token) and set to split buy
-        OrderSplitType::SplitSell => use_base_token, // If selling base_token and set to split sell
-        OrderSplitType::SplitBoth => true,          // Always split
+        OrderSplitType::SplitBuy => !hold_token_is_base, // Split if selling quote_token (i.e., buying base) and SplitBuy is set
+        OrderSplitType::SplitSell => hold_token_is_base,  // Split if selling base_token and SplitSell is set
+        OrderSplitType::SplitBoth => true,              // Always split first stage if SplitBoth is set
     };
-    
-    // Set trade direction
-    params.direction = if use_base_token {
-        exchange_types::TradeDirection::Sell // Sell base_token to get quote_token
-    } else {
-        exchange_types::TradeDirection::Buy // Buy base_token using quote_token
-    };
-    
-    // Execute first stage trade
-    let mut first_stage_outputs = Vec::new();
-    
+    ic_cdk::println!("Stage 1: Direction={:?}, ShouldSplit={}", params.direction, should_split_first);
+
+
+    let mut first_stage_outputs = Vec::new(); // Store the output amount(s) from stage 1
+
     if should_split_first {
-        // Split execute multiple orders
-        for amount in &split_amounts {
+        ic_cdk::println!("Stage 1: Executing {} split orders.", initial_split_amounts.len());
+        // Execute multiple split orders
+        for amount in &initial_split_amounts {
+            if *amount == 0 { // Skip zero amount trades
+                 ic_cdk::println!("Stage 1: Skipping zero amount trade.");
+                 continue;
+            }
             params.amount = *amount;
-            match connector.execute_trade(&params).await {
+             ic_cdk::println!("Stage 1: Executing trade with amount: {}", params.amount);
+            match connector.execute_call_trade(&params).await {
                 Ok(result) => {
-                    total_volume += result.input_amount;
+                    ic_cdk::println!("Stage 1: Trade successful. Input: {}, Output: {}", result.input_amount, result.output_amount);
+                    total_volume = total_volume.saturating_add(result.input_amount); // Add input amount to volume
                     first_stage_outputs.push(result.output_amount);
                 },
-                Err(e) => return Err(format!("First stage trade failed: {:?}", e)),
+                Err(e) => {
+                    let error_msg = format!("Stage 1 trade failed (split execution): {:?}", e);
+                    ic_cdk::println!("Error: {}", error_msg);
+                    return Err(error_msg);
+                },
             }
         }
     } else {
-        // Single execute
-        params.amount = split_amounts.iter().sum();
-        match connector.execute_trade(&params).await {
-            Ok(result) => {
-                total_volume += result.input_amount;
-                first_stage_outputs.push(result.output_amount);
-            },
-            Err(e) => return Err(format!("First stage trade failed: {:?}", e)),
+        // Execute a single order for the total amount
+        params.amount = initial_split_amounts.iter().sum();
+        ic_cdk::println!("Stage 1: Executing single order with total amount: {}", params.amount);
+        if params.amount > 0 { // Only execute if total amount > 0
+            match connector.execute_call_trade(&params).await {
+                Ok(result) => {
+                    ic_cdk::println!("Stage 1: Trade successful. Input: {}, Output: {}", result.input_amount, result.output_amount);
+                    total_volume = total_volume.saturating_add(result.input_amount); // Add input amount to volume
+                    first_stage_outputs.push(result.output_amount);
+                },
+                Err(e) => {
+                    let error_msg = format!("Stage 1 trade failed (single execution): {:?}", e);
+                    ic_cdk::println!("Error: {}", error_msg);
+                    return Err(error_msg);
+                },
+            }
+        } else {
+            ic_cdk::println!("Stage 1: Skipping single trade as total amount is zero.");
         }
     }
-    
-    // Query updated unused balance
-    let _ = check_icpswap_balance().await;
-    
-    // Second stage trade - reverse trade (sell the token just obtained)
-    // Reverse trade direction
-    params.direction = match params.direction {
+
+     ic_cdk::println!("Stage 1 completed. Total volume so far: {}. Outputs received: {:?}", total_volume, first_stage_outputs);
+
+    // Check if any output was generated before proceeding to stage 2
+    let total_first_stage_output: u128 = first_stage_outputs.iter().sum();
+    if total_first_stage_output == 0 {
+         ic_cdk::println!("Warning: Stage 1 produced zero output. Skipping Stage 2.");
+         // Refresh balance even if stage 2 is skipped
+         let _ = check_icpswap_balance().await;
+         ic_cdk::println!("Final volume for this cycle: {}", total_volume);
+         return Ok(total_volume); // Return volume generated in stage 1
+    }
+
+    // Refresh balance after the first stage to get potentially updated unused amounts for stage 2
+    // Although ICPSwap's trade likely handles internal balance, an explicit check can be useful for debugging/state consistency.
+    ic_cdk::println!("Refreshing balance after Stage 1...");
+    if let Err(e) = check_icpswap_balance().await {
+        // Log the error but proceed, as the trade might have still left balance for stage 2
+        ic_cdk::println!("Warning: Failed to refresh balance after Stage 1: {}", e);
+    }
+
+
+    // --- Stage 2: Buy Hold Token Back ---
+    // Reverse the trade direction
+    params.direction = match params.direction { // Note: params.direction still holds the direction from Stage 1
         exchange_types::TradeDirection::Buy => exchange_types::TradeDirection::Sell,
         exchange_types::TradeDirection::Sell => exchange_types::TradeDirection::Buy,
     };
-    
+
+    // Determine if the second stage should be split
+    // If we are now buying base (Stage 1 was Sell) and SplitBuy is set -> split
+    // If we are now selling base (Stage 1 was Buy) and SplitSell is set -> split
     let should_split_second = match split_type {
         OrderSplitType::NoSplit => false,
-        OrderSplitType::SplitBuy => use_base_token, // If now buying base_token and set to split buy
-        OrderSplitType::SplitSell => !use_base_token, // If now selling base_token and set to split sell
-        OrderSplitType::SplitBoth => true,          // Always split
+        OrderSplitType::SplitBuy => params.direction == exchange_types::TradeDirection::Buy, // Split if buying base in stage 2
+        OrderSplitType::SplitSell => params.direction == exchange_types::TradeDirection::Sell, // Split if selling base in stage 2
+        OrderSplitType::SplitBoth => true, // Always split second stage if SplitBoth is set
     };
-    
+     ic_cdk::println!("Stage 2: Direction={:?}, ShouldSplit={}", params.direction, should_split_second);
+
     if should_split_second {
-        // Calculate how to split second stage trade
-        let mut second_stage_amounts = Vec::new();
-        if first_stage_outputs.len() == 1 {
-            // If first stage is single trade, split first stage output
-            let total_output = first_stage_outputs[0];
-            second_stage_amounts = split_amount(total_output, split_amounts.len());
+        // Decide amounts for split execution in stage 2
+        let second_stage_amounts = if first_stage_outputs.len() == 1 && initial_split_amounts.len() > 1 {
+            // If Stage 1 was a single trade but was *intended* to be split (initial_split_amounts > 1),
+            // split the single output based on the original intended split count for Stage 2.
+            ic_cdk::println!("Stage 2: Splitting single output from Stage 1 into {} parts.", initial_split_amounts.len());
+            split_amount(first_stage_outputs[0], initial_split_amounts.len()) // Use original split count
+        } else if first_stage_outputs.len() > 1 {
+             // If Stage 1 was already split, use its outputs directly for Stage 2 inputs.
+             ic_cdk::println!("Stage 2: Using {} outputs from Stage 1 as inputs.", first_stage_outputs.len());
+             first_stage_outputs // Use the individual outputs from stage 1
         } else {
-            // If first stage is multiple trades, use each output of first stage as input for second stage
-            second_stage_amounts = first_stage_outputs;
-        }
-        
-        // Split execute multiple orders
+            // If Stage 1 was single output and not intended to be split, split the output based on Stage 2's split decision.
+            // Need a split count. Use the count from initial_split_amounts as a reference.
+            let split_count = initial_split_amounts.len().max(1); // Ensure at least 1 split
+            ic_cdk::println!("Stage 2: Splitting single output from Stage 1 into {} parts (default).", split_count);
+            split_amount(first_stage_outputs[0], split_count)
+        };
+
+         ic_cdk::println!("Stage 2: Executing {} split orders with amounts: {:?}", second_stage_amounts.len(), second_stage_amounts);
+        // Execute multiple split orders for the second stage
         for amount in &second_stage_amounts {
+             if *amount == 0 { // Skip zero amount trades
+                 ic_cdk::println!("Stage 2: Skipping zero amount trade.");
+                 continue;
+             }
             params.amount = *amount;
-            match connector.execute_trade(&params).await {
+            ic_cdk::println!("Stage 2: Executing trade with amount: {}", params.amount);
+            match connector.execute_call_trade(&params).await {
                 Ok(result) => {
-                    total_volume += result.input_amount;
+                    ic_cdk::println!("Stage 2: Trade successful. Input: {}, Output: {}", result.input_amount, result.output_amount);
+                    // Volume counts the token *leaving* the user's control in the trade.
+                    total_volume = total_volume.saturating_add(result.input_amount);
                 },
-                Err(e) => return Err(format!("Second stage trade failed: {:?}", e)),
+                Err(e) => {
+                     // If one split order fails, should we stop or continue? For volume generation, maybe continue.
+                     // Log error and continue with other splits. Consider if partial failure needs different handling.
+                     ic_cdk::println!("Error: Stage 2 trade failed (split execution, amount {}): {:?}. Continuing...", params.amount, e);
+                    // Optionally: return Err here to halt the entire process on any failure.
+                    // return Err(format!("Stage 2 trade failed (split execution): {:?}", e));
+                },
             }
         }
     } else {
-        // Single execute
-        params.amount = first_stage_outputs.iter().sum();
-        match connector.execute_trade(&params).await {
-            Ok(result) => {
-                total_volume += result.input_amount;
-            },
-            Err(e) => return Err(format!("Second stage trade failed: {:?}", e)),
+        // Execute a single order for the total amount received from stage 1
+        params.amount = total_first_stage_output; // Sum of all outputs from stage 1
+         ic_cdk::println!("Stage 2: Executing single order with total amount: {}", params.amount);
+        if params.amount > 0 { // Only execute if total amount > 0
+            match connector.execute_call_trade(&params).await {
+                Ok(result) => {
+                     ic_cdk::println!("Stage 2: Trade successful. Input: {}, Output: {}", result.input_amount, result.output_amount);
+                     total_volume = total_volume.saturating_add(result.input_amount);
+                },
+                Err(e) => {
+                    let error_msg = format!("Stage 2 trade failed (single execution): {:?}", e);
+                    ic_cdk::println!("Error: {}", error_msg);
+                    // Decide if failure here should return Err or just log. Returning Err seems safer.
+                    return Err(error_msg);
+                },
+            }
+        } else {
+             ic_cdk::println!("Stage 2: Skipping single trade as total amount is zero.");
         }
     }
-    
-    // Query updated unused balance again
-    let _ = check_icpswap_balance().await;
-    
+
+     ic_cdk::println!("Stage 2 completed.");
+
+    // Final balance check after both stages
+    ic_cdk::println!("Refreshing balance after Stage 2...");
+     if let Err(e) = check_icpswap_balance().await {
+         ic_cdk::println!("Warning: Failed to refresh balance after Stage 2: {}", e);
+     };
+
+    ic_cdk::println!("execute_hedge_trades finished. Final total volume: {}", total_volume);
     Ok(total_volume)
 }
 

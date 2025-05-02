@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use candid::Principal;
 
 use crate::error::ExchangeResult;
+use crate::icpswap::ICPSwapSwapArgs;
 use crate::types::*;
 
 /// Interface for basic exchange operations
@@ -28,7 +29,10 @@ pub trait Trading: Exchange {
     
     /// Execute a trade
     async fn execute_trade(&self, params: &TradeParams) -> ExchangeResult<TradeResult>;
-    
+    async fn execute_call_trade(
+        &self, params: &TradeParams
+    ) -> ExchangeResult<TradeResult>;
+
     /// Execute multiple trades in a batch
     async fn execute_batch_trade(&self, params: &BatchTradeParams) -> ExchangeResult<BatchTradeResult>;
     

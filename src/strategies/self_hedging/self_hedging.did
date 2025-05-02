@@ -6,6 +6,14 @@ type Exchange = variant {
   ICDex;
 };
 
+type TokenStandard = variant {
+  ICP;
+  ICRC1;
+  DIP20;
+  EXT;
+  Other : text;
+};
+
 type TokenMetadata = record {
   canister_id : principal;
   symbol : text;
@@ -42,6 +50,7 @@ type StrategyResult = variant {
 type SelfHedgingConfig = record {
   exchange : Exchange;
   trading_pair : TradingPair;
+  hold_token : principal;
   transaction_size : nat;
   order_split_type : OrderSplitType;
   check_interval_secs : nat64;
@@ -68,8 +77,7 @@ type VolumeStats = record {
   last_execution : opt nat64;
   transaction_size : nat;
   split_type : OrderSplitType;
-  base_token_symbol : text;
-  quote_token_symbol : text;
+  token_symbol : text;
 };
 
 type BalanceInfo = record {
@@ -111,6 +119,7 @@ service : {
   
   // Configuration updates
   update_config : (nat, OrderSplitType, nat64, float64) -> (StrategyResult);
+  update_volume_config: (nat, OrderSplitType) -> (StrategyResult);
   
   // Balance management
   deposit_to_exchange : (text, nat) -> (StrategyResult);

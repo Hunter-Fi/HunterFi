@@ -69,7 +69,11 @@ impl Trading for KongSwapConnector {
         // KongSwap integration not yet complete, returning unimplemented
         Err(ExchangeError::NotImplemented)
     }
-    
+
+    async fn execute_call_trade(&self, params: &TradeParams) -> ExchangeResult<TradeResult> {
+        Err(ExchangeError::NotImplemented)
+    }
+
     /// Executes a batch trade
     async fn execute_batch_trade(&self, params: &BatchTradeParams) -> ExchangeResult<BatchTradeResult> {
         // KongSwap integration not yet complete, returning unimplemented
