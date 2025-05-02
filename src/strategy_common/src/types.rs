@@ -39,6 +39,8 @@ pub struct TokenMetadata {
     pub canister_id: Principal,
     pub symbol: String,
     pub decimals: u8,
+    pub standard: String,
+    pub fee: u128,
 }
 
 /// Defines a trading pair
@@ -147,7 +149,8 @@ pub struct LimitOrderConfig {
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct SelfHedgingConfig {
     pub exchange: Exchange,              // Exchange type
-    pub trading_token: TokenMetadata,    // Token to generate volume for
+    pub trading_pair: TradingPair,    // Token to generate volume for
+    pub hold_token: Principal,
     pub transaction_size: u128,          // Size of each transaction (amount of tokens)
     pub order_split_type: OrderSplitType,// Type of order splitting to perform
     pub check_interval_secs: u64,        // Execution interval (seconds)
