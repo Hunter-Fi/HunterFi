@@ -118,7 +118,7 @@ service : {
   get_state : () -> (variant { Ok : SelfHedgingState; Err : text }) query;
   
   // Configuration updates
-  update_config : (nat, OrderSplitType, nat64, float64) -> (StrategyResult);
+  update_config : (nat, OrderSplitType, nat64, float64, principal) -> (StrategyResult);
   update_volume_config: (nat, OrderSplitType) -> (StrategyResult);
   
   // Balance management

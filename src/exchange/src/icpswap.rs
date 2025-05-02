@@ -639,7 +639,7 @@ impl ICPSwapConnector {
                     }
                 };
                 ic_cdk::println!("Deposit result: {}", deposit_result);
-                
+
                 // Step 4: Execute swap
                 let swap_args = ICPSwapSwapArgs {
                     zeroForOne: zero_for_one,
@@ -1233,7 +1233,7 @@ impl TokenOperations for ICPSwapConnector {
             TokenStandard::ICRC2| TokenStandard::ICP | TokenStandard::EXT|TokenStandard::DIP20=> {
                 let input_token_fee = match token.standard {
                     TokenStandard::ICRC1 | TokenStandard::ICP => 10000_u64,
-                    TokenStandard::ICRC2 => 10_u64,
+                    TokenStandard::ICRC2 => 1_000_000,
                     _ => 0_u64,
                 };
                 let input_token_fee_nat = candid::Nat::from(input_token_fee);
@@ -1271,7 +1271,7 @@ impl TokenOperations for ICPSwapConnector {
         let pool_data = self.get_pool_canister(&params.pair.base_token, &params.pair.quote_token).await?;
         let withdraw_fee_u64 = match token.standard {
             TokenStandard::ICRC1 | TokenStandard::ICP => 10000_u64,
-            TokenStandard::ICRC2 => 10_u64,
+            TokenStandard::ICRC2 => 1_000_000,
             TokenStandard::DIP20 => 0_u64,
             TokenStandard::EXT => 0_u64,
         };
