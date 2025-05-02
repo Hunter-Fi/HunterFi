@@ -38,8 +38,6 @@ struct SelfHedgingState {
 
 // Implement Storable for SelfHedgingState
 impl Storable for SelfHedgingState {
-    const BOUND: ic_stable_structures::storable::Bound = ic_stable_structures::storable::Bound::Unbounded;
-
     fn to_bytes(&self) -> std::borrow::Cow<[u8]> {
         let bytes = candid::encode_one(self).unwrap();
         std::borrow::Cow::Owned(bytes)
@@ -48,6 +46,8 @@ impl Storable for SelfHedgingState {
     fn from_bytes(bytes: std::borrow::Cow<[u8]>) -> Self {
         candid::decode_one(&bytes).unwrap()
     }
+
+    const BOUND: ic_stable_structures::storable::Bound = ic_stable_structures::storable::Bound::Unbounded;
 }
 
 // Thread-local storage for state
@@ -81,6 +81,7 @@ thread_local! {
                                 fee: 0,
                             },
                         },
+                        hold_token: Principal::anonymous(),
                         transaction_size: 0,
                         order_split_type: OrderSplitType::NoSplit,
                         check_interval_secs: 0,
@@ -181,6 +182,12 @@ async fn init_self_hedging(owner: Principal, config: SelfHedgingConfig) -> Strat
             return StrategyResult::Error("Invalid token canister IDs in trading pair".to_string());
         }
 
+        if  config.hold_token == Principal::anonymous() || (config.trading_pair.base_token.canister_id != config.hold_token
+            &&  config.trading_pair.quote_token.canister_id != config.hold_token) {
+            ic_cdk::println!("Error: Invalid hold token");
+            return StrategyResult::Error("Invalid hold token".to_string());
+        }
+
         if config.slippage_tolerance <= 0.0 || config.slippage_tolerance >= 1.0 {
              ic_cdk::println!("Error: Slippage tolerance must be between 0 and 1 (exclusive)");
             return StrategyResult::Error("Slippage tolerance must be between 0 and 1 (exclusive)".to_string());
@@ -254,7 +261,11 @@ async fn start() -> StrategyResult {
 
     // Approve base token for the pool
     ic_cdk::println!("Approving base token ({}) for pool {}", base_token_info.symbol, pool_data.pool_id);
-    match connector.approve_token(&base_token_info, &pool_data.pool_id, u128::MAX).await {
+    let hold_token = match state_data.config.hold_token == base_token_info.canister_id {
+        true => { base_token_info.clone() },
+        false => { quote_token_info.clone() }
+    };
+    match connector.approve_token(&hold_token, &pool_data.pool_id, u128::MAX).await {
         Ok(_) => {
              ic_cdk::println!("Base token approved successfully.");
         },
@@ -264,20 +275,6 @@ async fn start() -> StrategyResult {
             return StrategyResult::Error(error_msg);
         },
     }
-
-    // Approve quote token for the pool
-    ic_cdk::println!("Approving quote token ({}) for pool {}", quote_token_info.symbol, pool_data.pool_id);
-    match connector.approve_token(&quote_token_info, &pool_data.pool_id, u128::MAX).await {
-         Ok(_) => {
-              ic_cdk::println!("Quote token approved successfully.");
-         },
-         Err(e) => {
-             let error_msg = format!("Failed to approve quote token: {:?}", e);
-             ic_cdk::println!("{}", error_msg);
-             return StrategyResult::Error(error_msg);
-         },
-    }
-    ic_cdk::println!("Token approvals completed.");
     // --- End: Added Pool Info Fetching and Token Approval ---
 
 
