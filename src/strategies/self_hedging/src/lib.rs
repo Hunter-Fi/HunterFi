@@ -776,26 +776,57 @@ async fn execute_hedge_trades(
     let mut first_stage_outputs = Vec::new(); // Store the output amount(s) from stage 1
 
     if should_split_first {
-        ic_cdk::println!("Stage 1: Executing {} split orders", initial_split_amounts.len());
-        // Execute multiple split orders
+        ic_cdk::println!("Stage 1: Executing {} split orders concurrently", initial_split_amounts.len());
+        
+        // Prepare futures for all non-zero split orders
+        let mut futures = Vec::new();
+        
         for (i, amount) in initial_split_amounts.iter().enumerate() {
             if *amount == 0 { // Skip zero amount trades
-                 ic_cdk::println!("Stage 1: Skipping zero amount trade");
-                 continue;
+                ic_cdk::println!("Stage 1: Skipping zero amount trade");
+                continue;
             }
-            params.amount = *amount;
-            ic_cdk::println!("Stage 1: Executing split order #{}, Amount: {}", i+1, params.amount);
-            match connector.execute_call_trade_no_slippage(&params,&pool_data).await {
-                Ok(result) => {
-                    ic_cdk::println!("Stage 1: Trade successful. Input: {}, Output: {}", result.input_amount, result.output_amount);
-                    total_volume = total_volume.saturating_add(result.input_amount); // Add input amount to volume
-                    first_stage_outputs.push(result.output_amount);
-                },
-                Err(e) => {
-                    let error_msg = format!("Stage 1 trade failed (Split order #{}, Amount {}): {:?}", i+1, amount, e);
-                    ic_cdk::println!("Error: {}", error_msg);
-                    return Err(error_msg);
-                },
+            
+            // Clone needed data for the async future
+            let mut trade_params = params.clone();
+            trade_params.amount = *amount;
+            let pool_data_clone = pool_data.clone();
+            let idx = i;
+            let exchange_config = state_data.config.exchange.clone();
+            
+            ic_cdk::println!("Stage 1: Preparing split order #{}, Amount: {}", idx+1, trade_params.amount);
+            
+            // Create future for this trade
+            let future = async move {
+                // Create a new connector instance for each trade
+                let local_connector = create_icpswap_connector(&exchange_config);
+                (idx, local_connector.execute_call_trade_no_slippage(&trade_params, &pool_data_clone).await)
+            };
+            
+            futures.push(future);
+        }
+        
+        // Execute all trades concurrently and collect results
+        if !futures.is_empty() {
+            use futures::future::join_all;
+            let results = join_all(futures).await;
+            
+            // Process results maintaining original order for logging
+            for (idx, result) in results {
+                match result {
+                    Ok(trade_result) => {
+                        ic_cdk::println!("Stage 1: Trade #{} successful. Input: {}, Output: {}", 
+                                        idx+1, trade_result.input_amount, trade_result.output_amount);
+                        total_volume = total_volume.saturating_add(trade_result.input_amount);
+                        first_stage_outputs.push(trade_result.output_amount);
+                    },
+                    Err(e) => {
+                        let error_msg = format!("Stage 1 trade failed (Split order #{}, Amount {}): {:?}", 
+                                              idx+1, initial_split_amounts[idx], e);
+                        ic_cdk::println!("Error: {}", error_msg);
+                        return Err(error_msg);
+                    }
+                }
             }
         }
     } else {
@@ -803,7 +834,7 @@ async fn execute_hedge_trades(
         params.amount = initial_split_amounts.iter().sum();
         ic_cdk::println!("Stage 1: Executing single order, Total amount: {}", params.amount);
         if params.amount > 0 { // Only execute if total amount > 0
-            match connector.execute_call_trade(&params).await {
+            match connector.execute_call_trade_no_slippage(&params,&pool_data).await {
                 Ok(result) => {
                     ic_cdk::println!("Stage 1: Trade successful. Input: {}, Output: {}", result.input_amount, result.output_amount);
                     total_volume = total_volume.saturating_add(result.input_amount); // Add input amount to volume
@@ -832,13 +863,6 @@ async fn execute_hedge_trades(
         return Ok(total_volume); // Return volume generated in stage 1
     }
 
-    // Refresh balance after the first stage to get potentially updated unused amounts for stage 2
-    ic_cdk::println!("Refreshing balance after Stage 1...");
-    if let Err(e) = check_icpswap_balance().await {
-        // Log the error but proceed, as the trade might have still left balance for stage 2
-        ic_cdk::println!("Warning: Failed to refresh balance after Stage 1: {}", e);
-    }
-
     // --- Stage 2: Buy Hold Token Back ---
     // Reverse the trade direction
     params.direction = match params.direction {
@@ -865,27 +889,56 @@ async fn execute_hedge_trades(
         // Calculate Stage 2 split amounts based on total output and the new split count
         let second_stage_amounts = split_amount(total_first_stage_output, split_count);
         
-        ic_cdk::println!("Stage 2: Executing {} split orders, Amounts: {:?}", second_stage_amounts.len(), second_stage_amounts);
+        ic_cdk::println!("Stage 2: Executing {} split orders concurrently, Amounts: {:?}", 
+                        second_stage_amounts.len(), second_stage_amounts);
         
-        // Execute the multiple split orders
+        // Prepare futures for all non-zero split orders
+        let mut futures = Vec::new();
+        
         for (i, amount) in second_stage_amounts.iter().enumerate() {
             if *amount == 0 { // Skip zero amount trades
                 ic_cdk::println!("Stage 2: Skipping zero amount trade");
                 continue;
             }
-            params.amount = *amount;
-            ic_cdk::println!("Stage 2: Executing split order #{}, Amount: {}", i+1, params.amount);
-            match connector.execute_call_trade(&params).await {
-                Ok(result) => {
-                    ic_cdk::println!("Stage 2: Trade successful. Input: {}, Output: {}", result.input_amount, result.output_amount);
-                    total_volume = total_volume.saturating_add(result.input_amount);
-                },
-                Err(e) => {
-                    // If one split order fails, log but continue with other split orders
-                    ic_cdk::println!("Error: Stage 2 trade failed (Split order #{}, Amount {}): {:?}. Continuing with subsequent orders...", 
-                                    i+1, amount, e);
-                    // Do not return error, continue trying other split orders
-                },
+            
+            // Clone needed data for the async future
+            let mut trade_params = params.clone();
+            trade_params.amount = *amount;
+            let idx = i;
+            let exchange_config = state_data.config.exchange.clone();
+            
+            ic_cdk::println!("Stage 2: Preparing split order #{}, Amount: {}", idx+1, trade_params.amount);
+            
+            // Create future for this trade
+            let pool_data_clone = pool_data.clone();
+            let future = async move {
+                // Create a new connector instance for each trade
+                let local_connector = create_icpswap_connector(&exchange_config);
+                (idx, local_connector.execute_call_trade_no_slippage(&trade_params,&pool_data_clone).await)
+            };
+            
+            futures.push(future);
+        }
+        
+        // Execute all trades concurrently and collect results - for Stage 2 errors are non-fatal
+        if !futures.is_empty() {
+            use futures::future::join_all;
+            let results = join_all(futures).await;
+            
+            // Process results maintaining original order for logging
+            for (idx, result) in results {
+                match result {
+                    Ok(trade_result) => {
+                        ic_cdk::println!("Stage 2: Trade #{} successful. Input: {}, Output: {}", 
+                                        idx+1, trade_result.input_amount, trade_result.output_amount);
+                        total_volume = total_volume.saturating_add(trade_result.input_amount);
+                    },
+                    Err(e) => {
+                        // For Stage 2, errors are non-fatal - log and continue
+                        ic_cdk::println!("Error: Stage 2 trade failed (Split order #{}, Amount {}): {:?}. Continuing with other orders...", 
+                                        idx+1, second_stage_amounts[idx], e);
+                    }
+                }
             }
         }
     } else {
@@ -893,7 +946,7 @@ async fn execute_hedge_trades(
         params.amount = total_first_stage_output; // Sum of all outputs from stage 1
         ic_cdk::println!("Stage 2: Executing single order, Total amount: {}", params.amount);
         if params.amount > 0 { // Only execute if total amount > 0
-            match connector.execute_call_trade(&params).await {
+            match connector.execute_call_trade_no_slippage(&params,&pool_data).await {
                 Ok(result) => {
                     ic_cdk::println!("Stage 2: Trade successful. Input: {}, Output: {}", result.input_amount, result.output_amount);
                     total_volume = total_volume.saturating_add(result.input_amount);
