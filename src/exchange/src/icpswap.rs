@@ -1025,6 +1025,51 @@ impl ICPSwapConnector {
         let balance = self.get_token_balance(token, &canister_id).await?;
         Ok(format!("Current balance: {}", balance))
     }
+
+    pub async fn execute_call_trade_no_slippage (
+        &self, params: &TradeParams,pool_data: &PoolInfo
+    ) -> ExchangeResult<TradeResult> {
+
+        // 4. Determine input and output tokens
+        let (input_token, output_token) = match params.direction {
+            TradeDirection::Buy => (&params.pair.quote_token, &params.pair.base_token),
+            TradeDirection::Sell => (&params.pair.base_token, &params.pair.quote_token),
+        };
+        // 5. Determine zero_for_one value and input amount
+        let zero_for_one = self.is_zero_for_one(input_token, output_token);
+        let amount_in_u128 = params.amount;
+        let amount_in_str = amount_in_u128.to_string();
+
+        // Step 4: Execute swap
+        let swap_args = ICPSwapSwapArgs {
+            zeroForOne: zero_for_one,
+            amountIn: amount_in_str,
+            amountOutMinimum: "0".to_string(),
+        };
+        ic_cdk::println!("Executing swap");
+        let swap_result = self.call_swap(&pool_data.pool_id, swap_args).await
+            .map_err(|e| {
+                ic_cdk::println!("Swap failed directly: {:?}", e);
+                // Potentially call handle_swap_failure here
+                e
+            })?;
+        ic_cdk::println!("Swap result: {}", swap_result);
+        let final_output_amount_u128 = u128::try_from(swap_result.0.clone()).map_err(|e| { // Use swap_result for final amount
+            ExchangeError::InternalError(format!("Failed to convert final swap result Nat {:?} to u128: {}", swap_result.0, e))
+        })?;
+        let pool_fee_u64 = u64::try_from(pool_data.fee)
+            .map_err(|e| ExchangeError::InternalError(format!("Failed to convert pool fee Nat {:?} to u64: {}", pool_data.fee, e)))?;
+        let trade_result = TradeResult {
+            input_amount: params.amount,
+            output_amount: final_output_amount_u128, // Use the amount calculated from swap_result
+            fee_amount: (params.amount as f64 * (pool_fee_u64 as f64 / 1_000_000.0)) as u128,
+            price: if params.amount > 0 { final_output_amount_u128 as f64 / params.amount as f64 } else { 0.0 },
+            timestamp: utils::current_timestamp_secs(),
+            transaction_id: Some(format!("icpswap_{}_{}", pool_data.pool_id.to_string(), utils::current_timestamp_nanos())),
+        };
+
+        Ok(trade_result)
+    }
 }
 
 #[async_trait]
@@ -1182,7 +1227,7 @@ impl Trading for ICPSwapConnector {
 
         Ok(trade_result)
     }
-    
+
     /// Execute multiple trades in a batch
     async fn execute_batch_trade(&self, params: &BatchTradeParams) -> ExchangeResult<BatchTradeResult> {
         let mut results = Vec::new();

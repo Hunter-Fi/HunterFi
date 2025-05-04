@@ -749,8 +749,9 @@ async fn execute_hedge_trades(
 
     let state_data = STATE.with(|state| state.borrow().get().clone());
     let connector = create_icpswap_connector(&state_data.config.exchange);
+    
     let mut params = create_trade_params(&state_data.config); // Creates params with default direction/amount
-
+    let pool_data = connector.get_pool_info(&params.pair.base_token,&params.pair.quote_token).await.map_err(|e| format!("Failed to get pool info: {}", e))?;
     let mut total_volume = 0u128;
 
     // --- Stage 1: Sell Hold Token ---
@@ -784,7 +785,7 @@ async fn execute_hedge_trades(
             }
             params.amount = *amount;
             ic_cdk::println!("Stage 1: Executing split order #{}, Amount: {}", i+1, params.amount);
-            match connector.execute_call_trade(&params).await {
+            match connector.execute_call_trade_no_slippage(&params,&pool_data).await {
                 Ok(result) => {
                     ic_cdk::println!("Stage 1: Trade successful. Input: {}, Output: {}", result.input_amount, result.output_amount);
                     total_volume = total_volume.saturating_add(result.input_amount); // Add input amount to volume
