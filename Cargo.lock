@@ -403,6 +403,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "icpswaptest"
+version = "0.1.0"
+dependencies = [
+ "candid",
+ "exchange",
+ "ic-cdk",
+ "ic-cdk-macros",
+ "ic-ledger-types",
+ "serde",
+ "strategy_common",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -675,6 +688,8 @@ name = "strategy_self_hedging"
 version = "0.1.0"
 dependencies = [
  "candid",
+ "exchange",
+ "futures",
  "ic-cdk",
  "ic-cdk-macros",
  "ic-stable-structures",

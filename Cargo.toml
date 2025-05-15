@@ -9,6 +9,7 @@ members = [
     "src/strategies/fixed_balance",
     "src/strategies/limit_order",
     "src/strategies/self_hedging",
+    "test/icpswaptest",
 ]
 
 [workspace.dependencies]
@@ -23,3 +24,4 @@ ic-ledger-types = "0.14"
 async-trait = "0.1.68"
 bincode = "1.3.3"
 anyhow = "1.0"
+futures = "0.3"

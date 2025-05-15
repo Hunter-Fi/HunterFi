@@ -1,22 +1,27 @@
+// Common Types that might be shared or are fundamental for factory canister
+
+// From strategy_common::types
 type Exchange = variant {
   ICPSwap;
-  KongSwap;
-  Sonic;
-  InfinitySwap;
-  ICDex;
+  // Add other exchanges if they are defined in strategy_common::types::Exchange
 };
 
+// From strategy_common::types
 type TokenMetadata = record {
-  canister_id : principal;
-  symbol : text;
-  decimals : nat8;
+  canister_id: principal;
+  symbol: text;
+  decimals: nat8;
+  standard: text; // e.g., "ICRC1", "DIP20", "ICP"
+  fee: nat; // Added based on typical token metadata, adjust if different
 };
 
+// From strategy_common::types
 type TradingPair = record {
-  base_token : TokenMetadata;
-  quote_token : TokenMetadata;
+  base_token: TokenMetadata;
+  quote_token: TokenMetadata;
 };
 
+// From strategy_common::types
 type OrderSplitType = variant {
   NoSplit;
   SplitBuy;
@@ -24,186 +29,194 @@ type OrderSplitType = variant {
   SplitBoth;
 };
 
-type OrderType = variant {
-  Buy;
-  Sell;
-};
-
+// From strategy_common::types
 type StrategyType = variant {
-  DollarCostAveraging;
-  ValueAveraging;
+  DCA;
+  ValueAveraging; // Assuming this corresponds to ValueAvg in Rust
   FixedBalance;
   LimitOrder;
   SelfHedging;
 };
 
-type StrategyStatus = variant {
-  Created;
-  Running;
-  Paused;
-  EmergencyStopped;
-  Terminated;
-};
-
-type DeploymentStatus = variant {
-  PendingPayment;
-  AuthorizationConfirmed;
-  PaymentReceived;
-  CanisterCreated;
-  CodeInstalled;
-  Initialized;
-  Deployed;
-  DeploymentCancelled;
-  DeploymentFailed;
-  Refunding;
-  Refunded;
-};
-
-type StrategyMetadata = record {
-  canister_id : principal;
-  strategy_type : StrategyType;
-  owner : principal;
-  created_at : nat64;
-  status : StrategyStatus;
-  exchange : Exchange;
-  trading_pair : TradingPair;
-};
-
-type DeploymentRecord = record {
-  deployment_id : text;
-  strategy_type : StrategyType;
-  owner : principal;
-  fee_amount : nat64;
-  request_time : nat64;
-  status : DeploymentStatus;
-  canister_id : opt principal;
-  config_data : vec nat8;
-  error_message : opt text;
-  last_updated : nat64;
-};
-
-type DeploymentRequest = record {
-  deployment_id : text;
-  fee_amount : nat64;
-  strategy_type : StrategyType;
-};
-
-type DeploymentResult = variant {
-  Success : principal;
-  Error : text;
-};
-
-type TransactionType = variant {
-  Deposit;
-  Withdrawal;
-  Transfer;
-  DeploymentFee;
-  Refund;
-  AdminAdjustment;
-};
-
-type TransactionRecord = record {
-  transaction_id : text;
-  user : principal;
-  amount : nat64;
-  transaction_type : TransactionType;
-  description : text;
-  timestamp : nat64;
-};
-
+// From factory/src/state.rs or common
 type UserAccount = record {
-  owner : principal;
-  balance : nat64;
-  total_deposited : nat64;
-  total_consumed : nat64;
-  last_deposit : nat64;
+  owner: principal;
+  balance: nat64;        // User balance in e8s
+  last_deposit: nat64;   // Timestamp of last deposit
+  total_deposited: nat64; // Total amount deposited
+  total_consumed: nat64;  // Total amount consumed
 };
 
+// From factory/src/state.rs or common
+type TransactionType = variant {
+    Deposit;
+    DeploymentFee;
+    Refund;
+    AdminAdjustment;
+    Withdrawal;
+    Transfer;
+};
+
+// From factory/src/state.rs or common
+type TransactionRecord = record {
+  transaction_id: text; 
+  timestamp: nat64;
+  transaction_type: TransactionType;
+  amount: nat64; // Could be signed or have direction for withdrawals
+  details: text; // Or a more structured record for details
+  user: principal; // Often implicit if user calls get_transaction_history
+};
+
+// From strategy_common::types::DCAConfig
+type DCAConfig = record {
+  exchange: Exchange;
+  trading_pair: TradingPair;
+  amount_per_trade: nat; // Assuming u128 maps to nat
+  interval_secs: nat64;
+  // max_executions: opt nat64; // If present in Rust struct
+  // slippage_tolerance: float64; // If present in Rust struct
+};
+
+// From strategy_common::types::ValueAvgConfig
+type ValueAvgConfig = record {
+  exchange: Exchange;
+  trading_pair: TradingPair;
+  target_value_increase: nat; // Assuming u128 maps to nat
+  interval_secs: nat64;
+  // max_executions: opt nat64; // If present in Rust struct
+  // slippage_tolerance: float64; // If present in Rust struct
+};
+
+// From strategy_common::types::FixedBalanceConfig
+type FixedBalanceConfig = record {
+  exchange: Exchange;
+  // Define token_allocations structure based on Rust struct
+  // e.g., token_allocations: vec record { token_id: principal; weight: float64 };
+  // rebalance_threshold: float64;
+  interval_secs: nat64;
+  // slippage_tolerance: float64;
+};
+
+// From strategy_common::types::LimitOrderConfig
+type LimitOrderConfig = record {
+  exchange: Exchange;
+  trading_pair: TradingPair;
+  // order_type: variant { Buy; Sell }; // If present in Rust struct
+  price: nat; // Assuming u128 maps to nat for price
+  amount: nat; // Assuming u128 maps to nat for amount
+  // expiration_secs: opt nat64; // If present in Rust struct
+  // slippage_tolerance: float64;
+};
+
+// From strategy_common::types::SelfHedgingConfig
+type SelfHedgingConfig = record {
+  exchange: Exchange;
+  trading_pair: TradingPair;
+  hold_token: principal;
+  transaction_size: nat; // Assuming u128 maps to nat
+  order_split_type: OrderSplitType;
+  check_interval_secs: nat64;
+  slippage_tolerance: float64;
+};
+
+// From factory/src/deployment_manager.rs or factory/src/api.rs
+// This is the structure returned by request_*_strategy methods
+type DeploymentRequest = record {
+  deployment_id: text;
+  payment_address: opt text; // From Rust: Option<String> -> opt text
+  fee_paid: bool; // From Rust: bool -> bool
+};
+
+// From strategy_common::types::StrategyMetadata
+// Used in get_strategies_by_owner, get_all_strategies, get_strategy
+type StrategyMetadata = record {
+  canister_id: principal;
+  strategy_type: StrategyType;
+  owner: principal;
+  creation_timestamp: nat64; // Assuming u64 maps to nat64 for timestamp
+  // Add other fields if present in Rust struct StrategyMetadata from strategy_common
+};
+
+// From strategy_common::types::DeploymentRecord
+// Used in get_deployment_records, get_my_deployment_records, get_deployment
+type DeploymentRecord = record {
+  deployment_id: text; // From Rust: String
+  owner: principal;    // From Rust: Principal
+  strategy_type: StrategyType; // From Rust: StrategyType
+  // requested_config_json: text; // If you decide to expose this from Rust: String
+  status: text; // From Rust: String, consider making this a variant if states are fixed
+  canister_id: opt principal; // From Rust: Option<Principal>
+  creation_timestamp: nat64; // From Rust: u64
+  last_update_timestamp: nat64; // From Rust: u64
+  error_message: opt text; // From Rust: Option<String>
+};
+
+// From factory/src/deployment_manager.rs (DeploymentResult type)
+type DeploymentResultKind = variant { // Renamed to avoid conflict if DeploymentResult is a service method
+    Success: principal;
+    Failure: text;
+};
+
+
+// Factory Service Definition
 service : {
-  // Admin management
-  add_admin : (principal) -> (variant { Ok; Err : text });
-  remove_admin : (principal) -> (variant { Ok; Err : text });
-  get_admins : () -> (vec principal) query;
-  is_caller_admin : () -> (bool) query;
+  // Admin functions
+  add_admin: (principal) -> (variant { Ok: null; Err: text });
+  remove_admin: (principal) -> (variant { Ok: null; Err: text });
+  get_admins: () -> (vec principal) query;
+  is_caller_admin: () -> (bool) query;
+
+  // WASM module management
+  get_strategy_wasm: (StrategyType) -> (opt vec nat8) query;
+
+  // Deployment fee management
+  set_deployment_fee: (nat64) -> (variant { Ok: null; Err: text });
+  get_deployment_fee: () -> (nat64) query;
+
+  // Strategy registry queries
+  get_strategies_by_owner: (principal) -> (vec StrategyMetadata) query;
+  get_all_strategies: () -> (variant { Ok: vec StrategyMetadata; Err: text }) query;
+  get_strategy: (principal) -> (opt StrategyMetadata) query;
+  get_strategy_count: () -> (nat64) query;
+
+  // Deployment record management
+  get_deployment_records: () -> (vec DeploymentRecord) query;
+  get_my_deployment_records: () -> (vec DeploymentRecord) query;
+  get_deployment: (text) -> (opt DeploymentRecord) query;
+
+  // Strategy deployment API
+  request_dca_strategy: (DCAConfig) -> (variant { Ok: DeploymentRequest; Err: text });
+  request_value_avg_strategy: (ValueAvgConfig) -> (variant { Ok: DeploymentRequest; Err: text });
+  request_fixed_balance_strategy: (FixedBalanceConfig) -> (variant { Ok: DeploymentRequest; Err: text });
+  request_limit_order_strategy: (LimitOrderConfig) -> (variant { Ok: DeploymentRequest; Err: text });
+  request_self_hedging_strategy: (SelfHedgingConfig) -> (variant { Ok: DeploymentRequest; Err: text });
+
+  // Admin-only force execution
+  force_execute_deployment: (text) -> (variant { Ok: DeploymentResultKind; Err: text });
+
+  // Cycles management
+  get_cycles_balance: () -> (nat) query;
+
+  // ICP withdrawal (Admin)
+  withdraw_icp: (principal, nat64) -> (variant { Ok: null; Err: text });
+
+  // User balance management API
+  deposit_icp: (nat64) -> (variant { Ok: nat64; Err: text });
+  withdraw_user_icp: (nat64) -> (variant { Ok: nat64; Err: text });
+  get_balance: () -> (nat64) query;
+  get_account_info: () -> (UserAccount) query; // Assuming UserAccount is defined
+  get_transaction_history: () -> (vec TransactionRecord) query; // Assuming TransactionRecord is defined
+
+  // Adjust user balance (Admin)
+  adjust_balance: (principal, nat64, text) -> (variant { Ok: null; Err: text });
+
+  // System maintenance
+  reset_system_timers: () -> (variant { Ok: null; Err: text });
+  get_timer_status: () -> (text) query;
+
+  // Version information
+  get_version: () -> (text) query;
   
-  // Strategy management
-  get_strategy_wasm : (StrategyType) -> (opt vec nat8) query;
-  set_deployment_fee : (nat64) -> (variant { Ok; Err : text });
-  get_deployment_fee : () -> (nat64) query;
-  get_strategies_by_owner : (principal) -> (vec StrategyMetadata) query;
-  get_all_strategies : () -> (vec StrategyMetadata) query;
-  get_strategy : (principal) -> (opt StrategyMetadata) query;
-  get_strategy_count : () -> (nat64) query;
-  
-  // Deployment management
-  get_deployment_records : () -> (vec DeploymentRecord) query;
-  get_my_deployment_records : () -> (vec DeploymentRecord) query;
-  get_deployment : (text) -> (opt DeploymentRecord) query;
-  force_execute_deployment : (text) -> (variant { Ok : DeploymentResult; Err : text });
-  
-  // Strategy deployment requests
-  request_dca_strategy : (record { 
-    exchange : Exchange;
-    base_token : TokenMetadata;
-    quote_token : TokenMetadata;
-    amount_per_execution : nat;
-    interval_secs : nat64;
-    max_executions : opt nat64;
-    slippage_tolerance : float64;
-  }) -> (variant { Ok : DeploymentRequest; Err : text });
-  
-  request_value_avg_strategy : (record { 
-    exchange : Exchange;
-    base_token : TokenMetadata;
-    quote_token : TokenMetadata;
-    target_value_increase : nat;
-    interval_secs : nat64;
-    max_executions : opt nat64;
-    slippage_tolerance : float64;
-  }) -> (variant { Ok : DeploymentRequest; Err : text });
-  
-  request_fixed_balance_strategy : (record { 
-    exchange : Exchange;
-    token_allocations : vec record { text; float64 };
-    rebalance_threshold : float64;
-    interval_secs : nat64;
-    slippage_tolerance : float64;
-  }) -> (variant { Ok : DeploymentRequest; Err : text });
-  
-  request_limit_order_strategy : (record { 
-    exchange : Exchange;
-    base_token : TokenMetadata;
-    quote_token : TokenMetadata;
-    order_type : OrderType;
-    price : nat;
-    amount : nat;
-    expiration : opt nat64;
-    slippage_tolerance : float64;
-  }) -> (variant { Ok : DeploymentRequest; Err : text });
-  
-  request_self_hedging_strategy : (record { 
-    exchange : Exchange;
-    trading_token : TokenMetadata;
-    transaction_size : nat;
-    order_split_type : OrderSplitType;
-    check_interval_secs : nat64;
-    slippage_tolerance : float64;
-  }) -> (variant { Ok : DeploymentRequest; Err : text });
-  
-  // User account management
-  deposit_icp : (nat64) -> (variant { Ok : nat64; Err : text });
-  withdraw_user_icp : (nat64) -> (variant { Ok : nat64; Err : text });
-  get_balance : () -> (nat64) query;
-  get_account_info : () -> (UserAccount) query;
-  get_transaction_history : () -> (vec TransactionRecord) query;
-  
-  // Admin operations
-  withdraw_icp : (principal, nat64) -> (variant { Ok; Err : text });
-  adjust_balance : (principal, nat64, text) -> (variant { Ok; Err : text });
-  
-  // System management
-  reset_system_timers : () -> (variant { Ok; Err : text });
-  get_timer_status : () -> (text) query;
-  get_cycles_balance : () -> (nat64) query;
-  get_version : () -> (text) query;
+  // Debug
+  debug_strategies_storage: () -> (text) query;
 }
